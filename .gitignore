@@ -1,0 +1,10 @@
+.qmk-build/
+.build-rgb/
+.qmk-*.txt
+.downloads/
+backups/
+dist/
+.venv/
+__pycache__/
+*.py[cod]
+*.log

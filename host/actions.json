@@ -1,0 +1,19 @@
+{
+  "agent_1": { "type": "agent", "slot": 0 },
+  "agent_2": { "type": "agent", "slot": 1 },
+  "agent_3": { "type": "agent", "slot": 2 },
+  "agent_4": { "type": "agent", "slot": 3 },
+  "agent_5": { "type": "agent", "slot": 4 },
+  "agent_6": { "type": "agent", "slot": 5 },
+  "joystick_up": { "type": "slash", "command": "/plan", "focus": true },
+  "joystick_right": { "type": "shortcut", "keys": ["CTRL", "]"], "focus": false },
+  "joystick_down": { "type": "shortcut", "keys": ["CTRL", "B"], "focus": false },
+  "joystick_left": { "type": "shortcut", "keys": ["CTRL", "["], "focus": false },
+  "center": { "type": "shortcut", "keys": ["CTRL", "SHIFT", "P"], "focus": false },
+  "fast_mode": { "type": "slash", "command": "/fast", "focus": true },
+  "approve": { "type": "shortcut", "keys": ["ENTER"], "focus": false },
+  "decline": { "type": "shortcut", "keys": ["ESC"], "focus": false },
+  "continue_new": { "type": "fork_new_chat" },
+  "dictation": { "type": "shortcut", "keys": ["CTRL", "SHIFT", "D"], "focus": false },
+  "send": { "type": "shortcut", "keys": ["ENTER"], "focus": false }
+}

@@ -1,0 +1,4 @@
+{
+  "description": "MF17 lifecycle hooks are installed globally by scripts/install-global-hooks.ps1.",
+  "hooks": {}
+}
