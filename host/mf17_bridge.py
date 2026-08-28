@@ -1,20 +1,20 @@
-"""Raw HID bridge between an MF17 QMK keymap and the ChatGPT/Codex desktop app."""
+"""Raw HID bridge between an MF17 QMK keymap and Jetski (with 10-agent support)."""
 
 from __future__ import annotations
 
 import argparse
 import ctypes
-from ctypes import wintypes
 import json
 import os
 from pathlib import Path
+import re
 import socket
+import subprocess
 import sys
 import time
 import traceback
 from typing import Any
 from urllib.parse import quote
-import re
 
 
 VID = 0x3A54
@@ -24,10 +24,13 @@ USAGE = 0x61
 REPORT_SIZE = 32
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 41717
-ULONG_PTR = ctypes.c_uint64 if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 LOG_PATH = Path(__file__).with_name("mf17_bridge.log")
-SESSION_ID_PATTERN = re.compile(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$", re.IGNORECASE)
+
+UUID_PATTERN = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$", re.IGNORECASE)
+SESSION_FILE_PATTERN = re.compile(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$", re.IGNORECASE)
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
+STALE_THINKING_TIMEOUT_SECS = 45.0
+AGENT_SLOT_COUNT = 10
 
 MSG_ACTION = 0x10
 MSG_SET_STATUS = 0x20
@@ -47,10 +50,32 @@ STATUS_IDS = {
     "error": 5,
 }
 
+ACTION_NAMES = {
+    1: "agent_1",
+    2: "agent_2",
+    3: "agent_3",
+    4: "agent_4",
+    5: "agent_5",
+    6: "agent_6",
+    7: "agent_7",
+    8: "agent_8",
+    9: "agent_9",
+    10: "agent_0",
+    11: "approve",
+    12: "reject",
+    13: "up",
+    14: "down",
+    15: "new_chat",
+    16: "dictation",
+    17: "send",
+}
+
 
 def latest_transcript_state(path: Path) -> str | None:
-    """Return a terminal fallback state from the newest Codex turn marker."""
+    """Return a terminal fallback state from the newest turn marker in a transcript."""
     try:
+        if not path.exists():
+            return None
         with path.open("rb") as stream:
             size = stream.seek(0, os.SEEK_END)
             start = max(0, size - TRANSCRIPT_TAIL_BYTES)
@@ -66,44 +91,45 @@ def latest_transcript_state(path: Path) -> str | None:
             record = json.loads(raw_line)
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        if record.get("type") != "event_msg":
-            continue
-        event_type = record.get("payload", {}).get("type")
-        if event_type == "task_complete":
-            return "complete"
-        if event_type == "turn_aborted":
-            return "idle"
-        if event_type == "task_started":
-            return None
-    return None
 
-ACTION_NAMES = {
-    1: "agent_1",
-    2: "agent_2",
-    3: "agent_3",
-    4: "agent_4",
-    5: "agent_5",
-    6: "agent_6",
-    7: "joystick_up",
-    8: "joystick_right",
-    9: "joystick_down",
-    10: "joystick_left",
-    11: "center",
-    12: "fast_mode",
-    13: "approve",
-    14: "decline",
-    15: "continue_new",
-    16: "dictation",
-    17: "send",
-}
+        step_type = record.get("type", "")
+        status = record.get("status", "")
+
+        if step_type == "USER_INPUT":
+            return None
+
+        if step_type == "PLANNER_RESPONSE" or status in {"DONE", "ERROR"}:
+            tool_calls = record.get("tool_calls") or []
+            for tc in tool_calls:
+                tname = str(tc.get("name", "")).lower()
+                if "ask_question" in tname or "ask_custom_permission" in tname or "request_user_input" in tname:
+                    return "waiting"
+            if status == "ERROR" or record.get("error"):
+                return "error"
+            if status == "DONE" and not tool_calls:
+                return "complete"
+            if status == "DONE" and tool_calls:
+                return None
+
+        # Codex transcript fallback
+        if record.get("type") == "event_msg":
+            event_type = record.get("payload", {}).get("type")
+            if event_type == "task_complete":
+                return "complete"
+            if event_type == "turn_aborted":
+                return "idle"
+            if event_type == "task_started":
+                return None
+
+    return None
 
 
 class SessionSlots:
     def __init__(self) -> None:
-        self.slots: list[dict[str, Any] | None] = [None] * 6
+        self.slots: list[dict[str, Any] | None] = [None] * AGENT_SLOT_COUNT
         self.active_session: str | None = None
 
-    def update(self, session_id: str, status: str, remove: bool = False) -> int | None:
+    def update(self, session_id: str, status: str, remove: bool = False, from_hook: bool = True) -> int | None:
         now = time.time()
         existing = next(
             (index for index, item in enumerate(self.slots) if item and item["session_id"] == session_id),
@@ -121,12 +147,13 @@ class SessionSlots:
         if existing is None:
             existing = next((index for index, item in enumerate(self.slots) if item is None), None)
         if existing is None:
-            existing = min(range(6), key=lambda index: self.slots[index]["updated"])
+            existing = min(range(AGENT_SLOT_COUNT), key=lambda index: self.slots[index]["updated"])
 
         self.slots[existing] = {
             "session_id": session_id,
             "status": status,
             "updated": now,
+            "last_hook_time": now if from_hook else self.slots[existing].get("last_hook_time", 0) if self.slots[existing] else 0,
         }
         self.active_session = session_id
         return existing
@@ -136,19 +163,29 @@ class SessionSlots:
         return item["session_id"] if item else None
 
     def reconcile_terminal(self, session_id: str, status: str) -> int | None:
-        """Resolve a stale thinking state after a missed Stop/interrupt hook."""
+        """Resolve a stale thinking state ONLY after STALE_THINKING_TIMEOUT_SECS without hook updates."""
         existing = next(
             (index for index, item in enumerate(self.slots) if item and item["session_id"] == session_id),
             None,
         )
-        if existing is None or self.slots[existing]["status"] != "thinking":
+        if existing is None:
             return None
+
+        current_status = self.slots[existing]["status"]
+        if current_status != "thinking":
+            return None
+
+        now = time.time()
+        last_hook = self.slots[existing].get("last_hook_time", 0)
+        if (now - last_hook) < STALE_THINKING_TIMEOUT_SECS:
+            return None
+
         self.slots[existing]["status"] = status
-        self.slots[existing]["updated"] = time.time()
+        self.slots[existing]["updated"] = now
         return existing
 
     def populate_recent(self, session_ids: list[str]) -> bool:
-        """Fill unused slots from recent Codex task files without disturbing live status."""
+        """Fill unused slots from recent task files without disturbing live status."""
         changed = False
         known = {item["session_id"] for item in self.slots if item}
         for session_id in session_ids:
@@ -161,6 +198,7 @@ class SessionSlots:
                 "session_id": session_id,
                 "status": "idle",
                 "updated": time.time(),
+                "last_hook_time": 0,
             }
             known.add(session_id)
             changed = True
@@ -171,15 +209,35 @@ class SessionSlots:
         return changed
 
 
-class WindowsController:
-    VK = {
+class OSController:
+    """Cross-platform controller for macOS, Windows, and Linux."""
+
+    MAC_KEY_CODES = {
+        "ENTER": 36,
+        "RETURN": 36,
+        "ESC": 53,
+        "ESCAPE": 53,
+        "TAB": 48,
+        "SPACE": 49,
+        "LEFT": 123,
+        "RIGHT": 124,
+        "DOWN": 125,
+        "UP": 126,
+    }
+
+    WIN_VK = {
         "CTRL": 0x11,
         "SHIFT": 0x10,
         "ALT": 0x12,
         "TAB": 0x09,
         "ENTER": 0x0D,
+        "RETURN": 0x0D,
         "ESC": 0x1B,
+        "ESCAPE": 0x1B,
         "DOWN": 0x28,
+        "UP": 0x26,
+        "LEFT": 0x25,
+        "RIGHT": 0x27,
         "B": 0x42,
         "D": 0x44,
         "K": 0x4B,
@@ -191,105 +249,215 @@ class WindowsController:
 
     def __init__(self, sessions: SessionSlots) -> None:
         self.sessions = sessions
-        self.user32 = ctypes.windll.user32 if sys.platform == "win32" else None
-        self.shell32 = ctypes.windll.shell32 if sys.platform == "win32" else None
-        if self.user32 is not None:
-            self.user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-            self.user32.MapVirtualKeyW.restype = wintypes.UINT
-            self.user32.keybd_event.argtypes = [
-                wintypes.BYTE,
-                wintypes.BYTE,
-                wintypes.DWORD,
-                ULONG_PTR,
-            ]
-            self.user32.keybd_event.restype = None
-        if self.shell32 is not None:
-            self.shell32.ShellExecuteW.argtypes = [
-                wintypes.HWND,
-                wintypes.LPCWSTR,
-                wintypes.LPCWSTR,
-                wintypes.LPCWSTR,
-                wintypes.LPCWSTR,
-                ctypes.c_int,
-            ]
-            self.shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+        self.is_mac = sys.platform == "darwin"
+        self.is_win = sys.platform == "win32"
+        self.is_linux = sys.platform.startswith("linux")
 
-    def open_thread(self, session_id: str) -> None:
-        url = f"codex://threads/{quote(session_id, safe='')}"
-        if sys.platform == "win32":
-            self.shell32.ShellExecuteW(None, "open", url, None, None, 1)
+        if self.is_win:
+            self._init_windows()
         else:
-            print(f"Open {url}")
+            self.user32 = None
+            self.shell32 = None
 
-    def focus_active(self) -> None:
-        if self.sessions.active_session:
-            self.open_thread(self.sessions.active_session)
-            time.sleep(0.30)
+    def _init_windows(self) -> None:
+        from ctypes import wintypes
+        ULONG_PTR = ctypes.c_uint64 if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+        self.user32 = ctypes.windll.user32
+        self.shell32 = ctypes.windll.shell32
+        self.user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+        self.user32.MapVirtualKeyW.restype = wintypes.UINT
+        self.user32.keybd_event.argtypes = [
+            wintypes.BYTE,
+            wintypes.BYTE,
+            wintypes.DWORD,
+            ULONG_PTR,
+        ]
+        self.user32.keybd_event.restype = None
+        self.shell32.ShellExecuteW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        ]
+        self.shell32.ShellExecuteW.restype = wintypes.HINSTANCE
 
-    def _key(self, vk: int, up: bool = False) -> None:
-        # Supplying a real scan code matters for Electron's composer and
-        # command palette. Accelerator-only shortcuts worked with scan=0,
-        # but Enter/Tab/Escape were ignored by DOM keyboard handlers.
-        scan = self.user32.MapVirtualKeyW(vk, 0)
-        self.user32.keybd_event(vk, scan, 0x0002 if up else 0, 0)
+    def open_thread(self, session_id: str | None, slot: int = 0) -> None:
+        """Activate Jetski and focus/switch to the selected conversation."""
+        if self.is_mac:
+            try:
+                subprocess.run(["open", "-b", "com.google.jetski"], capture_output=True, timeout=1.5)
+            except Exception:
+                pass
 
-    def shortcut(self, keys: list[str], focus: bool = True) -> None:
-        if sys.platform != "win32":
-            print("Shortcut:", "+".join(keys))
-            return
-        if focus:
-            self.focus_active()
-        codes = [self.VK[key.upper()] for key in keys]
-        for code in codes:
-            self._key(code)
-        for code in reversed(codes):
-            self._key(code, up=True)
+            if session_id:
+                try:
+                    subprocess.run(["open", "-u", f"jetski-ide://conversation/{session_id}"], capture_output=True, timeout=1.5)
+                except Exception:
+                    pass
+        elif self.is_win:
+            if self.shell32 and session_id:
+                url = f"jetski-ide://conversation/{quote(session_id, safe='')}"
+                self.shell32.ShellExecuteW(None, "open", url, None, None, 1)
+        elif self.is_linux:
+            if session_id:
+                try:
+                    subprocess.run(["xdg-open", f"jetski-ide://conversation/{session_id}"], capture_output=True, timeout=1.5)
+                except Exception:
+                    pass
+
+    def shortcut(self, keys: list[str], focus: bool = False) -> None:
+        normalized: list[str] = []
+        for k in keys:
+            k_upper = k.upper()
+            if k_upper in {"CTRL_OR_CMD", "PRIMARY"}:
+                normalized.append("CMD" if self.is_mac else "CTRL")
+            else:
+                normalized.append(k_upper)
+
+        if self.is_mac:
+            modifiers: list[str] = []
+            target_key: str | None = None
+            key_code: int | None = None
+
+            for k in normalized:
+                if k in {"CMD", "COMMAND"}:
+                    modifiers.append("command down")
+                elif k in {"CTRL", "CONTROL"}:
+                    modifiers.append("control down")
+                elif k in {"SHIFT"}:
+                    modifiers.append("shift down")
+                elif k in {"ALT", "OPTION"}:
+                    modifiers.append("option down")
+                elif k in self.MAC_KEY_CODES:
+                    key_code = self.MAC_KEY_CODES[k]
+                else:
+                    target_key = k.lower()
+
+            using_clause = ""
+            if modifiers:
+                if len(modifiers) == 1:
+                    using_clause = f" using {modifiers[0]}"
+                else:
+                    using_clause = f" using {{{', '.join(modifiers)}}}"
+
+            if key_code is not None:
+                script = f'tell application "System Events" to key code {key_code}{using_clause}'
+            elif target_key is not None:
+                escaped_key = target_key.replace('\\', '\\\\').replace('"', '\\"')
+                script = f'tell application "System Events" to keystroke "{escaped_key}"{using_clause}'
+            else:
+                return
+
+            try:
+                subprocess.run(["osascript", "-e", script], capture_output=True, timeout=1.5)
+            except Exception as exc:
+                print(f"macOS shortcut error: {exc}", file=sys.stderr)
+
+        elif self.is_win:
+            codes = []
+            for k in normalized:
+                if k in self.WIN_VK:
+                    codes.append(self.WIN_VK[k])
+                elif len(k) == 1:
+                    codes.append(ord(k))
+            for code in codes:
+                if self.user32:
+                    scan = self.user32.MapVirtualKeyW(code, 0)
+                    self.user32.keybd_event(code, scan, 0, 0)
+            for code in reversed(codes):
+                if self.user32:
+                    scan = self.user32.MapVirtualKeyW(code, 0)
+                    self.user32.keybd_event(code, scan, 0x0002, 0)
+
+        elif self.is_linux:
+            xdo_keys = []
+            for k in normalized:
+                if k in {"CTRL", "CMD"}:
+                    xdo_keys.append("ctrl")
+                elif k == "SHIFT":
+                    xdo_keys.append("shift")
+                elif k in {"ALT", "OPTION"}:
+                    xdo_keys.append("alt")
+                elif k in {"ENTER", "RETURN"}:
+                    xdo_keys.append("Return")
+                elif k in {"ESC", "ESCAPE"}:
+                    xdo_keys.append("Escape")
+                elif k == "UP":
+                    xdo_keys.append("Up")
+                elif k == "DOWN":
+                    xdo_keys.append("Down")
+                else:
+                    xdo_keys.append(k.lower())
+            try:
+                subprocess.run(["xdotool", "key", "+".join(xdo_keys)], capture_output=True, timeout=1.5)
+            except Exception:
+                pass
 
     def type_text(self, text: str) -> None:
-        if sys.platform != "win32":
-            return
-        for character in text:
-            scan = self.user32.VkKeyScanW(ord(character))
-            vk = scan & 0xFF
-            modifiers = (scan >> 8) & 0xFF
-            held: list[int] = []
-            for flag, code in ((1, self.VK["SHIFT"]), (2, self.VK["CTRL"]), (4, self.VK["ALT"])):
-                if modifiers & flag:
-                    self._key(code)
-                    held.append(code)
-            self._key(vk)
-            self._key(vk, up=True)
-            for code in reversed(held):
-                self._key(code, up=True)
+        if self.is_mac:
+            escaped = text.replace('\\', '\\\\').replace('"', '\\"')
+            script = f'tell application "System Events" to keystroke "{escaped}"'
+            try:
+                subprocess.run(["osascript", "-e", script], capture_output=True, timeout=1.5)
+            except Exception:
+                pass
+        elif self.is_win and self.user32 is not None:
+            for character in text:
+                scan = self.user32.VkKeyScanW(ord(character))
+                vk = scan & 0xFF
+                modifiers = (scan >> 8) & 0xFF
+                held: list[int] = []
+                for flag, code in ((1, self.WIN_VK["SHIFT"]), (2, self.WIN_VK["CTRL"]), (4, self.WIN_VK["ALT"])):
+                    if modifiers & flag:
+                        s = self.user32.MapVirtualKeyW(code, 0)
+                        self.user32.keybd_event(code, s, 0, 0)
+                        held.append(code)
+                s = self.user32.MapVirtualKeyW(vk, 0)
+                self.user32.keybd_event(vk, s, 0, 0)
+                self.user32.keybd_event(vk, s, 0x0002, 0)
+                for code in reversed(held):
+                    s = self.user32.MapVirtualKeyW(code, 0)
+                    self.user32.keybd_event(code, s, 0x0002, 0)
+        elif self.is_linux:
+            try:
+                subprocess.run(["xdotool", "type", "--", text], capture_output=True, timeout=1.5)
+            except Exception:
+                pass
 
     def palette(self, command: str) -> None:
-        self.shortcut(["CTRL", "SHIFT", "P"])
-        time.sleep(0.20)
-        self.type_text(command)
+        self.shortcut(["CTRL_OR_CMD", "SHIFT", "P"], focus=False)
         time.sleep(0.15)
+        self.type_text(command)
+        time.sleep(0.10)
         self.shortcut(["ENTER"], focus=False)
 
     def slash(self, command: str, focus: bool = False) -> None:
-        if focus:
-            self.focus_active()
-        self.type_text(command)
-        time.sleep(0.08)
-        self.shortcut(["ENTER"], focus=False)
-
-    def fork_new_chat(self) -> None:
-        """Run /fork and choose the normal-chat option below new worktree."""
-        self.slash("/fork", focus=True)
-        time.sleep(0.45)
-        self.shortcut(["DOWN"], focus=False)
-        time.sleep(0.08)
-        self.shortcut(["ENTER"], focus=False)
+        if self.is_mac:
+            escaped = command.replace('\\', '\\\\').replace('"', '\\"')
+            script = (
+                f'tell application "System Events"\n'
+                f'  keystroke "{escaped}"\n'
+                f'  delay 0.05\n'
+                f'  key code 36\n'
+                f'end tell'
+            )
+            try:
+                subprocess.run(["osascript", "-e", script], capture_output=True, timeout=1.5)
+            except Exception:
+                pass
+        else:
+            self.type_text(command)
+            time.sleep(0.05)
+            self.shortcut(["ENTER"], focus=False)
 
 
 class Bridge:
     def __init__(self, actions_path: Path, dry_run: bool = False) -> None:
         self.actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.sessions = SessionSlots()
-        self.controller = WindowsController(self.sessions)
+        self.controller = OSController(self.sessions)
         self.device: Any = None
         self.dry_run = dry_run
         self.udp_socket: socket.socket | None = None
@@ -306,26 +474,58 @@ class Bridge:
         except OSError:
             pass
 
-    def refresh_recent_sessions(self) -> None:
-        sessions_root = Path.home() / ".codex" / "sessions"
-        try:
-            candidates = sorted(
-                sessions_root.rglob("*.jsonl"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            return
+    def find_recent_sessions(self) -> list[tuple[str, Path]]:
+        results: list[tuple[str, Path]] = []
+        found_ids: set[str] = set()
 
+        app_data_dir = os.environ.get("JETSKI_APP_DATA_DIR")
+        jetski_brain = Path(app_data_dir) / "brain" if app_data_dir else Path.home() / ".gemini" / "jetski" / "brain"
+        
+        if jetski_brain.exists() and jetski_brain.is_dir():
+            try:
+                subdirs = sorted(
+                    [p for p in jetski_brain.iterdir() if p.is_dir() and UUID_PATTERN.match(p.name)],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for d in subdirs[:AGENT_SLOT_COUNT]:
+                    session_id = d.name
+                    transcript = d / ".system_generated" / "logs" / "transcript.jsonl"
+                    if transcript.exists() and transcript.stat().st_size > 0:
+                        results.append((session_id, transcript))
+                        found_ids.add(session_id)
+            except OSError:
+                pass
+
+        codex_sessions = Path.home() / ".codex" / "sessions"
+        if codex_sessions.exists() and codex_sessions.is_dir():
+            try:
+                candidates = sorted(
+                    codex_sessions.rglob("*.jsonl"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for path in candidates:
+                    match = SESSION_FILE_PATTERN.search(path.name)
+                    if match:
+                        session_id = match.group(1)
+                        if session_id not in found_ids:
+                            results.append((session_id, path))
+                            found_ids.add(session_id)
+                    if len(results) >= AGENT_SLOT_COUNT:
+                        break
+            except OSError:
+                pass
+
+        return results
+
+    def refresh_recent_sessions(self) -> None:
+        recent = self.find_recent_sessions()
         session_ids: list[str] = []
-        for path in candidates:
-            match = SESSION_ID_PATTERN.search(path.name)
-            if match:
-                session_id = match.group(1)
-                session_ids.append(session_id)
-                self.session_files[session_id] = path
-            if len(session_ids) >= 12:
-                break
+        for session_id, path in recent:
+            session_ids.append(session_id)
+            self.session_files[session_id] = path
+
         if self.sessions.populate_recent(session_ids):
             self.sync_leds()
             self.log("loaded recent task slots: " + ", ".join(
@@ -347,7 +547,7 @@ class Bridge:
         try:
             import hid
         except ImportError:
-            raise SystemExit("hidapi is missing; install host/requirements.txt")
+            raise SystemExit("hidapi is missing; install host/requirements.txt (pip install hidapi)")
 
         candidates = [
             item
@@ -382,14 +582,21 @@ class Bridge:
         status = payload.get("status", "idle")
         if status not in STATUS_IDS:
             status = "idle"
+        session_id = str(
+            payload.get("session_id")
+            or payload.get("conversationId")
+            or payload.get("conversation_id")
+            or "unknown"
+        )
         slot = self.sessions.update(
-            str(payload.get("session_id", "unknown")),
+            session_id,
             status,
             bool(payload.get("remove", False)),
+            from_hook=True,
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
-            self.log(f"status session={payload.get('session_id', 'unknown')} state={status} slot={slot + 1}")
+            self.log(f"status session={session_id} state={status} slot={slot + 1}")
 
     def process_lighting(self, payload: dict[str, Any]) -> None:
         if payload.get("clear") is True:
@@ -419,20 +626,18 @@ class Bridge:
         if kind == "agent":
             slot = int(action["slot"])
             session_id = self.sessions.session_for_slot(slot)
+            self.send_report([MSG_SET_SELECTED, slot])
+            self.controller.open_thread(session_id, slot=slot)
             if session_id:
-                self.send_report([MSG_SET_SELECTED, slot])
-                self.controller.open_thread(session_id)
-                self.log(f"opened task slot={slot + 1} session={session_id}")
+                self.log(f"selected task slot={slot + 1} session={session_id}")
             else:
                 self.log(f"task slot={slot + 1} is empty")
         elif kind == "shortcut":
-            self.controller.shortcut(list(action["keys"]), focus=bool(action.get("focus", True)))
+            self.controller.shortcut(list(action["keys"]), focus=bool(action.get("focus", False)))
         elif kind == "palette":
             self.controller.palette(str(action["command"]))
         elif kind == "slash":
             self.controller.slash(str(action["command"]), focus=bool(action.get("focus", False)))
-        elif kind == "fork_new_chat":
-            self.controller.fork_new_chat()
 
     def run(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -440,8 +645,8 @@ class Bridge:
         sock.setblocking(False)
         self.udp_socket = sock
         last_connect_attempt = 0.0
-        print(f"MF17 Codex bridge listening on udp://{UDP_HOST}:{UDP_PORT}")
-        self.log("bridge started")
+        print(f"MF17 Jetski bridge listening on udp://{UDP_HOST}:{UDP_PORT} (10 Agent slots)")
+        self.log("bridge started (10 Agent slots)")
         self.refresh_recent_sessions()
 
         while True:
@@ -463,14 +668,15 @@ class Bridge:
                 while True:
                     data, _ = sock.recvfrom(4096)
                     payload = json.loads(data.decode("utf-8"))
-                    if payload.get("kind") == "codex_status":
+                    kind = payload.get("kind")
+                    if kind in {"jetski_status", "codex_status"}:
                         self.process_status(payload)
-                    elif payload.get("kind") == "lighting":
+                    elif kind == "lighting":
                         self.process_lighting(payload)
             except BlockingIOError:
                 pass
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                print(f"Ignored malformed status packet: {exc}", file=sys.stderr)
+                print(f"Ignored malformed packet: {exc}", file=sys.stderr)
 
             if self.device is not None:
                 try:
@@ -491,7 +697,7 @@ class Bridge:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="MF17 Jetski Keypad Bridge")
     parser.add_argument("--dry-run", action="store_true", help="run without opening HID")
     parser.add_argument(
         "--actions",

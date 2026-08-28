@@ -1,0 +1,42 @@
+{
+  "jetski-mf17-status": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 host/jetski_status_hook.py --event PreInvocation",
+        "timeout": 3
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 host/jetski_status_hook.py --event PreToolUse",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 host/jetski_status_hook.py --event PostToolUse",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 host/jetski_status_hook.py --event Stop",
+        "timeout": 3
+      }
+    ]
+  }
+}

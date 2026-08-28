@@ -13,15 +13,15 @@ enum custom_keycodes {
     CX_AGENT_4,
     CX_AGENT_5,
     CX_AGENT_6,
-    CX_UP,
-    CX_RIGHT,
-    CX_DOWN,
-    CX_LEFT,
-    CX_CENTER,
-    CX_FAST,
+    CX_AGENT_7,
+    CX_AGENT_8,
+    CX_AGENT_9,
+    CX_AGENT_0,
     CX_APPROVE,
-    CX_DECLINE,
-    CX_CONTINUE,
+    CX_REJECT,
+    CX_UP,
+    CX_DOWN,
+    CX_NEW_CHAT,
     CX_DICTATE,
     CX_SEND,
 };
@@ -46,10 +46,25 @@ enum agent_status {
     STATUS_ERROR,
 };
 
-/* QMK LED indices for Num, /, *, -, 7 and 9 on the upstream MF17 matrix. */
-static const uint8_t agent_leds[6] = {13, 14, 15, 16, 10, 12};
-static uint8_t agent_statuses[6] = {
-    STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF,
+#define AGENT_COUNT 10
+
+/*
+ * QMK LED indices for digits 1-9 and 0 on the MF17 matrix:
+ * Slot 0: Key 1 -> LED 4
+ * Slot 1: Key 2 -> LED 3
+ * Slot 2: Key 3 -> LED 2
+ * Slot 3: Key 4 -> LED 8
+ * Slot 4: Key 5 -> LED 7
+ * Slot 5: Key 6 -> LED 6
+ * Slot 6: Key 7 -> LED 10
+ * Slot 7: Key 8 -> LED 11
+ * Slot 8: Key 9 -> LED 12
+ * Slot 9: Key 0 -> LED 0
+ */
+static const uint8_t agent_leds[AGENT_COUNT] = {4, 3, 2, 8, 7, 6, 10, 11, 12, 0};
+static uint8_t agent_statuses[AGENT_COUNT] = {
+    STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF,
+    STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF, STATUS_OFF,
 };
 static uint8_t selected_agent = 0xFF;
 static rgb_t host_pixels[RGB_MATRIX_LED_COUNT] = {0};
@@ -59,7 +74,7 @@ static uint32_t key_feedback_timers[RGB_MATRIX_LED_COUNT] = {0};
 static bool lighting_dirty = true;
 static bool lighting_was_suspended = false;
 static uint32_t lighting_render_timer = 0;
-static bool recovery_minus_down = false;
+static bool recovery_top_right_down = false;
 static bool recovery_plus_down = false;
 static bool recovery_chord_active = false;
 static uint32_t recovery_chord_timer = 0;
@@ -83,30 +98,32 @@ static void send_action(uint8_t action) {
 
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     /*
-     * The KISNT-branded MF17 uses the lower/right matrix cells for its
-     * oversized +, 0, and Enter switches.  Upstream LAYOUT_numpad_5x4 maps
-     * those labels to [1][3], [4][0], and [3][3], which are electrically
-     * empty on this unit.  Use the physical 5x4 matrix directly instead.
+     * Layout:
+     * Row 0: Approve, Reject, Up, Down
+     * Row 1: 7, 8, 9, (empty)
+     * Row 2: 4, 5, 6, New Chat (+)
+     * Row 3: 1, 2, 3, (empty)
+     * Row 4: (empty), 0, Dictate (.), Send (Enter)
      */
     [0] = {
-        { CX_AGENT_1, CX_AGENT_2, CX_AGENT_3, CX_AGENT_4 },
-        { CX_AGENT_5, CX_UP,      CX_AGENT_6, KC_NO      },
-        { CX_LEFT,    CX_CENTER,  CX_RIGHT,   CX_FAST    },
-        { CX_APPROVE, CX_DOWN,    CX_DECLINE, KC_NO      },
-        { KC_NO,      CX_CONTINUE,CX_DICTATE, CX_SEND    },
+        { CX_APPROVE, CX_REJECT,  CX_UP,      CX_DOWN     },
+        { CX_AGENT_7, CX_AGENT_8, CX_AGENT_9, KC_NO       },
+        { CX_AGENT_4, CX_AGENT_5, CX_AGENT_6, CX_NEW_CHAT },
+        { CX_AGENT_1, CX_AGENT_2, CX_AGENT_3, KC_NO       },
+        { KC_NO,      CX_AGENT_0, CX_DICTATE, CX_SEND     },
     },
 };
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-    /* CX_AGENT_4 and CX_FAST occupy the physical - and + key positions. */
-    if (keycode == CX_AGENT_4 || keycode == CX_FAST) {
-        if (keycode == CX_AGENT_4) {
-            recovery_minus_down = record->event.pressed;
+    /* Recovery chord: CX_DOWN ([0][3]) and CX_NEW_CHAT ([2][3]) held for 3 seconds */
+    if (keycode == CX_DOWN || keycode == CX_NEW_CHAT) {
+        if (keycode == CX_DOWN) {
+            recovery_top_right_down = record->event.pressed;
         } else {
             recovery_plus_down = record->event.pressed;
         }
 
-        if (recovery_minus_down && recovery_plus_down) {
+        if (recovery_top_right_down && recovery_plus_down) {
             if (!recovery_chord_active) {
                 recovery_chord_active = true;
                 recovery_chord_timer = timer_read32();
@@ -118,7 +135,8 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         }
     }
 
-    if (record->event.pressed && keycode >= CX_UP && keycode <= CX_SEND) {
+    /* Non-Agent keys flash white and fade after each press */
+    if (record->event.pressed && keycode >= CX_APPROVE && keycode <= CX_SEND) {
         uint8_t led = g_led_config.matrix_co[record->event.key.row][record->event.key.col];
         if (led < RGB_MATRIX_LED_COUNT) {
             key_feedback_timers[led] = timer_read32();
@@ -133,7 +151,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
     send_action((uint8_t)(keycode - CX_AGENT_1 + 1));
 
-    if (keycode >= CX_AGENT_1 && keycode <= CX_AGENT_6) {
+    if (keycode >= CX_AGENT_1 && keycode <= CX_AGENT_0) {
         selected_agent = (uint8_t)(keycode - CX_AGENT_1);
         lighting_dirty = true;
     }
@@ -155,13 +173,13 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
     switch (data[0]) {
         case MSG_SET_STATUS:
-            if (length >= 3 && data[1] < 6 && data[2] <= STATUS_ERROR) {
+            if (length >= 3 && data[1] < AGENT_COUNT && data[2] <= STATUS_ERROR) {
                 agent_statuses[data[1]] = data[2];
                 lighting_dirty = true;
             }
             break;
         case MSG_SET_SELECTED:
-            selected_agent = data[1] < 6 ? data[1] : 0xFF;
+            selected_agent = data[1] < AGENT_COUNT ? data[1] : 0xFF;
             lighting_dirty = true;
             break;
         case MSG_SET_PIXEL:
@@ -254,7 +272,7 @@ static void render_lighting(void) {
         rgb_matrix_set_color(led, brightness, brightness, brightness);
     }
 
-    for (uint8_t slot = 0; slot < 6; slot++) {
+    for (uint8_t slot = 0; slot < AGENT_COUNT; slot++) {
         uint8_t led = agent_leds[slot];
         rgb_t color = status_color(agent_statuses[slot]);
         if (slot == selected_agent) {

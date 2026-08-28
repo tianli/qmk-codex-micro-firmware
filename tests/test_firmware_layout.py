@@ -13,19 +13,19 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertEqual(
             matrix,
             [
-                ["CX_AGENT_1", "CX_AGENT_2", "CX_AGENT_3", "CX_AGENT_4"],
-                ["CX_AGENT_5", "CX_UP", "CX_AGENT_6", "KC_NO"],
-                ["CX_LEFT", "CX_CENTER", "CX_RIGHT", "CX_FAST"],
-                ["CX_APPROVE", "CX_DOWN", "CX_DECLINE", "KC_NO"],
-                ["KC_NO", "CX_CONTINUE", "CX_DICTATE", "CX_SEND"],
+                ["CX_APPROVE", "CX_REJECT", "CX_UP", "CX_DOWN"],
+                ["CX_AGENT_7", "CX_AGENT_8", "CX_AGENT_9", "KC_NO"],
+                ["CX_AGENT_4", "CX_AGENT_5", "CX_AGENT_6", "CX_NEW_CHAT"],
+                ["CX_AGENT_1", "CX_AGENT_2", "CX_AGENT_3", "KC_NO"],
+                ["KC_NO", "CX_AGENT_0", "CX_DICTATE", "CX_SEND"],
             ],
         )
 
-    def test_agent_leds_match_the_six_agent_key_positions(self):
+    def test_agent_leds_match_the_ten_agent_key_positions(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
-        match = re.search(r"agent_leds\[6\]\s*=\s*\{([^}]+)\}", source)
+        match = re.search(r"agent_leds\[AGENT_COUNT\]\s*=\s*\{([^}]+)\}", source)
         self.assertIsNotNone(match)
-        self.assertEqual([int(value) for value in re.findall(r"\d+", match.group(1))], [13, 14, 15, 16, 10, 12])
+        self.assertEqual([int(value) for value in re.findall(r"\d+", match.group(1))], [4, 3, 2, 8, 7, 6, 10, 11, 12, 0])
 
     def test_status_colors_match_codex_micro(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
@@ -57,7 +57,7 @@ class FirmwareLayoutTests(unittest.TestCase):
         config = Path("firmware/keymaps/codex_micro/config.h").read_text(encoding="utf-8")
 
         self.assertRegex(config, r"#define\s+KEY_FEEDBACK_FADE_MS\s+900")
-        self.assertIn("keycode >= CX_UP && keycode <= CX_SEND", source)
+        self.assertIn("keycode >= CX_APPROVE && keycode <= CX_SEND", source)
         self.assertIn(
             "g_led_config.matrix_co[record->event.key.row][record->event.key.col]",
             source,
