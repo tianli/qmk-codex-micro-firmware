@@ -33,6 +33,7 @@ enum protocol_messages {
     MSG_SET_PIXEL = 0x22,
     MSG_SET_ALL = 0x23,
     MSG_CLEAR_PIXELS = 0x24,
+    MSG_BOOTLOADER = 0xAA,
     MSG_PING = 0x7E,
     MSG_PONG = 0x7F,
 };
@@ -80,12 +81,11 @@ static bool recovery_chord_active = false;
 static uint32_t recovery_chord_timer = 0;
 
 void keyboard_post_init_user(void) {
-    /*
-     * Keep QMK's effect renderer disabled and drive the WS2812 buffer from
-     * housekeeping_task_user(). This makes host/status lighting independent of
-     * stale RGB Matrix EEPROM state and of the advanced-indicator callback.
-     */
     rgb_matrix_disable_noeeprom();
+    for (uint8_t led = 0; led < RGB_MATRIX_LED_COUNT; led++) {
+        rgb_matrix_set_color(led, 0, 0, 0);
+    }
+    rgb_matrix_update_pwm_buffers();
     lighting_dirty = true;
 }
 
@@ -98,10 +98,10 @@ static void send_action(uint8_t action) {
 
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     /*
-     * Layout:
-     * Row 0: Approve, Reject, Up, Down
+     * Physical Layout:
+     * Row 0: Approve, Reject, Up, Down (Top-Right / physical -)
      * Row 1: 7, 8, 9, (empty)
-     * Row 2: 4, 5, 6, New Chat (+)
+     * Row 2: 4, 5, 6, New Chat (physical +)
      * Row 3: 1, 2, 3, (empty)
      * Row 4: (empty), 0, Dictate (.), Send (Enter)
      */
@@ -115,7 +115,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 };
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-    /* Recovery chord: CX_DOWN ([0][3]) and CX_NEW_CHAT ([2][3]) held for 3 seconds */
+    /* Recovery chord: CX_DOWN ([0][3], top-right) and CX_NEW_CHAT ([2][3], middle-right +) */
     if (keycode == CX_DOWN || keycode == CX_NEW_CHAT) {
         if (keycode == CX_DOWN) {
             recovery_top_right_down = record->event.pressed;
@@ -162,7 +162,7 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 void matrix_scan_user(void) {
     if (recovery_chord_active && timer_elapsed32(recovery_chord_timer) >= RECOVERY_HOLD_MS) {
         recovery_chord_active = false;
-        reset_keyboard();
+        bootloader_jump();
     }
 }
 
@@ -172,6 +172,9 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
     }
 
     switch (data[0]) {
+        case MSG_BOOTLOADER:
+            bootloader_jump();
+            break;
         case MSG_SET_STATUS:
             if (length >= 3 && data[1] < AGENT_COUNT && data[2] <= STATUS_ERROR) {
                 agent_statuses[data[1]] = data[2];
@@ -214,12 +217,12 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
 static rgb_t status_color(uint8_t status) {
     switch (status) {
-        case STATUS_IDLE:     return (rgb_t){255, 255, 255};
-        case STATUS_THINKING: return (rgb_t){48, 79, 254};
-        case STATUS_COMPLETE: return (rgb_t){0, 255, 76};
-        case STATUS_WAITING:  return (rgb_t){255, 109, 0};
-        case STATUS_ERROR:    return (rgb_t){255, 0, 51};
-        default:              return (rgb_t){0, 0, 0};
+        case STATUS_IDLE:     return (rgb_t){40, 40, 40};    /* Soft dim white for idle */
+        case STATUS_THINKING: return (rgb_t){48, 79, 254};   /* Blue */
+        case STATUS_COMPLETE: return (rgb_t){0, 255, 76};    /* Green */
+        case STATUS_WAITING:  return (rgb_t){255, 109, 0};   /* Amber */
+        case STATUS_ERROR:    return (rgb_t){255, 0, 51};     /* Red */
+        default:              return (rgb_t){0, 0, 0};       /* Off */
     }
 }
 
