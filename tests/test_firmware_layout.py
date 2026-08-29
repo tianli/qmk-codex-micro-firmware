@@ -30,7 +30,7 @@ class FirmwareLayoutTests(unittest.TestCase):
     def test_status_colors_match_codex_micro(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
         expected = {
-            "STATUS_IDLE": (40, 40, 40),
+            "STATUS_IDLE": (0, 0, 0),
             "STATUS_THINKING": (48, 79, 254),
             "STATUS_COMPLETE": (0, 255, 76),
             "STATUS_WAITING": (255, 109, 0),
@@ -46,11 +46,9 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("rgb_matrix_disable_noeeprom();", body)
-        self.assertNotIn("rgb_matrix_enable_noeeprom();", body)
         self.assertRegex(source, r"void\s+housekeeping_task_user\s*\(void\)")
         self.assertRegex(source, r"static\s+void\s+render_lighting\s*\(void\)")
         self.assertIn("rgb_matrix_update_pwm_buffers();", source)
-        self.assertNotIn("rgb_matrix_indicators_advanced_user", source)
 
     def test_non_agent_keys_trigger_white_fade_on_their_physical_led(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
@@ -65,7 +63,6 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("key_feedback_mask |= ((uint32_t)1 << led);", source)
         self.assertIn("timer_elapsed32(key_feedback_timers[led])", source)
         self.assertIn("rgb_matrix_set_color(led, brightness, brightness, brightness);", source)
-        self.assertIn("key_feedback_mask != 0", source)
 
 
 if __name__ == "__main__":

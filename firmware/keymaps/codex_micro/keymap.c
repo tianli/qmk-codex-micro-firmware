@@ -72,8 +72,6 @@ static rgb_t host_pixels[RGB_MATRIX_LED_COUNT] = {0};
 static uint32_t host_pixel_mask = 0;
 static uint32_t key_feedback_mask = 0;
 static uint32_t key_feedback_timers[RGB_MATRIX_LED_COUNT] = {0};
-static bool lighting_dirty = true;
-static bool lighting_was_suspended = false;
 static uint32_t lighting_render_timer = 0;
 static bool recovery_top_right_down = false;
 static bool recovery_plus_down = false;
@@ -82,11 +80,6 @@ static uint32_t recovery_chord_timer = 0;
 
 void keyboard_post_init_user(void) {
     rgb_matrix_disable_noeeprom();
-    for (uint8_t led = 0; led < RGB_MATRIX_LED_COUNT; led++) {
-        rgb_matrix_set_color(led, 0, 0, 0);
-    }
-    rgb_matrix_update_pwm_buffers();
-    lighting_dirty = true;
 }
 
 static void send_action(uint8_t action) {
@@ -115,7 +108,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 };
 
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
-    /* Recovery chord: CX_DOWN ([0][3], top-right) and CX_NEW_CHAT ([2][3], middle-right +) */
+    /* Recovery chord: CX_DOWN ([0][3], top-right) and CX_NEW_CHAT ([2][3], middle-right +) held for 2 seconds */
     if (keycode == CX_DOWN || keycode == CX_NEW_CHAT) {
         if (keycode == CX_DOWN) {
             recovery_top_right_down = record->event.pressed;
@@ -127,11 +120,9 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             if (!recovery_chord_active) {
                 recovery_chord_active = true;
                 recovery_chord_timer = timer_read32();
-                lighting_dirty = true;
             }
         } else {
             recovery_chord_active = false;
-            lighting_dirty = true;
         }
     }
 
@@ -141,7 +132,6 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         if (led < RGB_MATRIX_LED_COUNT) {
             key_feedback_timers[led] = timer_read32();
             key_feedback_mask |= ((uint32_t)1 << led);
-            lighting_dirty = true;
         }
     }
 
@@ -153,7 +143,6 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
     if (keycode >= CX_AGENT_1 && keycode <= CX_AGENT_0) {
         selected_agent = (uint8_t)(keycode - CX_AGENT_1);
-        lighting_dirty = true;
     }
 
     return false;
@@ -178,18 +167,15 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         case MSG_SET_STATUS:
             if (length >= 3 && data[1] < AGENT_COUNT && data[2] <= STATUS_ERROR) {
                 agent_statuses[data[1]] = data[2];
-                lighting_dirty = true;
             }
             break;
         case MSG_SET_SELECTED:
             selected_agent = data[1] < AGENT_COUNT ? data[1] : 0xFF;
-            lighting_dirty = true;
             break;
         case MSG_SET_PIXEL:
             if (length >= 5 && data[1] < RGB_MATRIX_LED_COUNT) {
                 host_pixels[data[1]] = (rgb_t){data[2], data[3], data[4]};
                 host_pixel_mask |= ((uint32_t)1 << data[1]);
-                lighting_dirty = true;
             }
             break;
         case MSG_SET_ALL:
@@ -198,12 +184,10 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
                     host_pixels[led] = (rgb_t){data[1], data[2], data[3]};
                     host_pixel_mask |= ((uint32_t)1 << led);
                 }
-                lighting_dirty = true;
             }
             break;
         case MSG_CLEAR_PIXELS:
             host_pixel_mask = 0;
-            lighting_dirty = true;
             break;
         case MSG_PING: {
             uint8_t packet[RAW_EPSIZE] = {0};
@@ -217,7 +201,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
 static rgb_t status_color(uint8_t status) {
     switch (status) {
-        case STATUS_IDLE:     return (rgb_t){40, 40, 40};    /* Soft dim white for idle */
+        case STATUS_IDLE:     return (rgb_t){0, 0, 0};        /* Idle slots remain OFF until active */
         case STATUS_THINKING: return (rgb_t){48, 79, 254};   /* Blue */
         case STATUS_COMPLETE: return (rgb_t){0, 255, 76};    /* Green */
         case STATUS_WAITING:  return (rgb_t){255, 109, 0};   /* Amber */
@@ -291,21 +275,13 @@ static void render_lighting(void) {
 
 void housekeeping_task_user(void) {
     if (rgb_matrix_get_suspend_state()) {
-        lighting_was_suspended = true;
         return;
     }
 
-    if (lighting_was_suspended) {
-        lighting_was_suspended = false;
-        lighting_dirty = true;
-    }
-
-    bool animated = recovery_chord_active || selected_agent != 0xFF || key_feedback_mask != 0;
-    if ((!lighting_dirty && !animated) || timer_elapsed32(lighting_render_timer) < 16) {
+    if (timer_elapsed32(lighting_render_timer) < 16) {
         return;
     }
 
     lighting_render_timer = timer_read32();
     render_lighting();
-    lighting_dirty = false;
 }
