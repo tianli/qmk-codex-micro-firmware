@@ -13,26 +13,20 @@ from typing import Any
 HOST = "127.0.0.1"
 PORT = 41717
 
-# Tools that typically prompt the user for permission or input in Jetski
+# Tools that prompt the user for interactive input, questions, or explicit permission
 PERMISSION_TOOL_NAMES = {
-    "run_command",
-    "write_to_file",
-    "replace_file_content",
-    "notebook_edit",
     "ask_question",
     "ask_custom_permission",
     "ask_user",
     "request_user_input",
     "functions__request_user_input",
-    "generate_image",
-    "manage_task",
-    "manage_subagents",
     "requestuserinput",
     "user_input",
     "userinput",
     "elicitation",
     "confirm",
     "confirmation",
+    "permission",
 }
 
 WAITING_NAME_MARKERS = (
