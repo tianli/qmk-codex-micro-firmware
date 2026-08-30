@@ -11,18 +11,18 @@ import shutil
 import subprocess
 import sys
 
-# Numeric keys in recency order: 0 is newest, 1 is 2nd newest, ..., 9 is 10th
+# Numeric keys in logical keypad order: 1..9, and 0 (10th)
 DIGIT_LABELS = {
-    0: "Key 0 (Most Recent)",
-    1: "Key 1 (Rank 2)",
-    2: "Key 2 (Rank 3)",
-    3: "Key 3 (Rank 4)",
-    4: "Key 4 (Rank 5)",
-    5: "Key 5 (Rank 6)",
-    6: "Key 6 (Rank 7)",
-    7: "Key 7 (Rank 8)",
-    8: "Key 8 (Rank 9)",
-    9: "Key 9 (Rank 10)",
+    1: "Key 1 (Agent 1)",
+    2: "Key 2 (Agent 2)",
+    3: "Key 3 (Agent 3)",
+    4: "Key 4 (Agent 4)",
+    5: "Key 5 (Agent 5)",
+    6: "Key 6 (Agent 6)",
+    7: "Key 7 (Agent 7)",
+    8: "Key 8 (Agent 8)",
+    9: "Key 9 (Agent 9)",
+    0: "Key 0 (Agent 10)",
 }
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "host" / "mf17_bridge.log"
@@ -44,10 +44,14 @@ def get_conversation_workspace(session_id: str) -> str:
     if transcript.exists():
         try:
             with open(transcript, "r", encoding="utf-8") as f:
-                first_line = json.loads(f.readline())
-                content = str(first_line.get("content", "")).strip().split("\n")[0]
-                if content:
-                    return f"Prompt: {content[:42]}..."
+                for line in f:
+                    rec = json.loads(line)
+                    if rec.get("type") == "USER_INPUT" or rec.get("role") == "user":
+                        content = str(rec.get("content", "") or rec.get("text", "")).strip()
+                        clean = re.sub(r"<[^>]+>", "", content).strip()
+                        clean = " ".join(clean.split())
+                        if clean:
+                            return f"Prompt: {clean[:42]}..."
         except Exception:
             pass
 
@@ -81,40 +85,69 @@ def main() -> int:
         print("No bridge log found at:", LOG_PATH)
         return 1
 
+    lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    # Find the most recent bridge start line
+    start_idx = 0
+    for idx, line in enumerate(lines):
+        if "bridge started" in line:
+            start_idx = idx
+
     slot_map: dict[int, str] = {}
     status_map: dict[str, str] = {}
 
-    with open(LOG_PATH, "r", encoding="utf-8") as f:
-        for line in f:
-            if "loaded numeric task slots:" in line:
-                # Format: 0=id1, 1=id2, ...
-                raw = line.split("loaded numeric task slots:")[-1].strip()
-                pairs = [p.strip() for p in raw.split(",") if "=" in p]
-                for p in pairs:
-                    k, v = p.split("=", 1)
-                    try:
-                        slot_map[int(k.strip())] = v.strip()
-                    except ValueError:
-                        pass
-            elif "loaded recent task slots:" in line:
-                raw_ids = line.split("loaded recent task slots:")[-1].strip()
-                session_ids = [s.strip() for s in raw_ids.split(",") if s.strip()]
-                for idx, sid in enumerate(session_ids[:10]):
-                    slot_map[idx] = sid
+    for line in lines[start_idx:]:
+        if "loaded numeric task slots:" in line:
+            raw = line.split("loaded numeric task slots:")[-1].strip()
+            pairs = [p.strip() for p in raw.split(",") if "=" in p]
+            for p in pairs:
+                k, v = p.split("=", 1)
+                try:
+                    slot_map[int(k.strip())] = v.strip()
+                except ValueError:
+                    pass
+        elif "loaded recent task slots:" in line:
+            raw_ids = line.split("loaded recent task slots:")[-1].strip()
+            session_ids = [s.strip() for s in raw_ids.split(",") if s.strip()]
+            for idx, sid in enumerate(session_ids[:10]):
+                slot_map[idx] = sid
 
-            match = re.search(r"status session=([0-9a-f-]+) state=(\w+)", line)
-            if match:
-                sid, state = match.groups()
+        # Check status updates
+        match = re.search(r"status.*session=([0-9a-f-]+).*state=(\w+).*key=(\d)", line)
+        if match:
+            sid, state, key_str = match.groups()
+            key_num = int(key_str)
+            if state == "off":
+                slot_map.pop(key_num, None)
+            else:
+                slot_map[key_num] = sid
                 status_map[sid] = state
 
-    if not slot_map:
-        print("No task slots have been assigned yet.")
-        return 0
+        # Check reconciled terminal state updates
+        match_rec = re.search(r"reconciled session=([0-9a-f-]+) state=(\w+) key=(\d)", line)
+        if match_rec:
+            sid, state, key_str = match_rec.groups()
+            key_num = int(key_str)
+            if state == "off":
+                slot_map.pop(key_num, None)
+            else:
+                slot_map[key_num] = sid
+                status_map[sid] = state
+
+        # Check window/process terminations
+        m_close = re.search(r"session ([0-9a-f-]+).*turned off slot (\d+)", line)
+        if m_close:
+            sid, slot_str = m_close.groups()
+            for k, v in list(slot_map.items()):
+                if v == sid:
+                    slot_map.pop(k, None)
 
     print(f"\n{'Key / Recency':<24} | {'Status':<10} | {'Workspace / Info':<48} | {'Conversation ID'}")
     print("-" * 120)
 
-    for digit in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+    # Display in logical keypad key order: Key 1..9, Key 0
+    ordered_keys = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)
+    for digit in ordered_keys:
         key_label = DIGIT_LABELS.get(digit, f"Key {digit}")
         sid = slot_map.get(digit)
         if sid:
