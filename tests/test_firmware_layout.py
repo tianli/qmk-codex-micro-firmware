@@ -21,16 +21,39 @@ class FirmwareLayoutTests(unittest.TestCase):
             ],
         )
 
-    def test_agent_leds_match_the_ten_agent_key_positions(self):
+    def test_logical_lighting_ids_use_physical_matrix_positions(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
-        match = re.search(r"agent_leds\[AGENT_COUNT\]\s*=\s*\{([^}]+)\}", source)
+        match = re.search(
+            r"lighting_key_positions\[LIGHTING_KEY_COUNT\]\[2\]\s*=\s*\{(.*?)\};",
+            source,
+            re.DOTALL,
+        )
         self.assertIsNotNone(match)
-        self.assertEqual([int(value) for value in re.findall(r"\d+", match.group(1))], [4, 3, 2, 8, 7, 6, 10, 11, 12, 0])
+        positions = [tuple(map(int, pair)) for pair in re.findall(r"\{(\d+),\s*(\d+)\}", match.group(1))]
+        self.assertEqual(
+            positions,
+            [
+                (0, 0), (0, 1), (0, 2), (0, 3),
+                (1, 0), (1, 1), (1, 2), (2, 3),
+                (2, 0), (2, 1), (2, 2), (3, 0),
+                (3, 1), (3, 2), (4, 1), (4, 2),
+                (4, 3),
+            ],
+        )
+
+    def test_agent_statuses_use_logical_digit_keys(self):
+        source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
+        match = re.search(r"agent_keys\[AGENT_COUNT\]\s*=\s*\{(.*?)\};", source, re.DOTALL)
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            re.findall(r"LIGHT_[0-9]", match.group(1)),
+            ["LIGHT_1", "LIGHT_2", "LIGHT_3", "LIGHT_4", "LIGHT_5", "LIGHT_6", "LIGHT_7", "LIGHT_8", "LIGHT_9", "LIGHT_0"],
+        )
 
     def test_status_colors_match_codex_micro(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
         expected = {
-            "STATUS_IDLE": (0, 0, 0),
+            "STATUS_IDLE": (255, 255, 255),
             "STATUS_THINKING": (48, 79, 254),
             "STATUS_COMPLETE": (0, 255, 76),
             "STATUS_WAITING": (255, 109, 0),
@@ -46,9 +69,11 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("rgb_matrix_disable_noeeprom();", body)
+        self.assertNotIn("rgb_matrix_enable_noeeprom();", body)
         self.assertRegex(source, r"void\s+housekeeping_task_user\s*\(void\)")
         self.assertRegex(source, r"static\s+void\s+render_lighting\s*\(void\)")
         self.assertIn("rgb_matrix_update_pwm_buffers();", source)
+        self.assertNotIn("rgb_matrix_indicators_advanced_user", source)
 
     def test_non_agent_keys_trigger_white_fade_on_their_physical_led(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
@@ -63,6 +88,27 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("key_feedback_mask |= ((uint32_t)1 << led);", source)
         self.assertIn("timer_elapsed32(key_feedback_timers[led])", source)
         self.assertIn("rgb_matrix_set_color(led, brightness, brightness, brightness);", source)
+        self.assertIn("key_feedback_mask != 0", source)
+
+    def test_v2_per_key_api_is_versioned_acknowledged_and_final(self):
+        source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
+        for command in (
+            "MSG_GET_CAPABILITIES",
+            "MSG_CAPABILITIES",
+            "MSG_SET_KEY_RGB",
+            "MSG_SET_KEYS_RGB",
+            "MSG_SET_ALL_KEYS_RGB",
+            "MSG_CLEAR_KEY_RGB",
+            "MSG_CLEAR_ALL_KEY_RGB",
+            "MSG_ACK",
+        ):
+            self.assertIn(command, source)
+        self.assertRegex(source, r"#define\s+LIGHTING_PROTOCOL_VERSION\s+2")
+        self.assertRegex(source, r"#define\s+ACTION_LAYOUT_TEN_AGENT\s+2")
+        self.assertIn("packet[7] = ACTION_LAYOUT_TEN_AGENT;", source)
+        self.assertIn("packet[2] = ACTION_LAYOUT_TEN_AGENT;", source)
+        self.assertIn("send_ack(data[1], data[0], ACK_OK);", source)
+        self.assertGreater(source.rindex("host_key_mask &"), source.index("status_color(agent_statuses[slot])"))
 
 
 if __name__ == "__main__":

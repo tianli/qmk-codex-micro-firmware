@@ -11,9 +11,16 @@
   "agent_0": { "type": "agent", "slot": 9 },
   "approve": { "type": "shortcut", "keys": ["ENTER"], "focus": false },
   "reject": { "type": "shortcut", "keys": ["ESC"], "focus": false },
-  "up": { "type": "shortcut", "keys": ["UP"], "focus": false },
-  "down": { "type": "shortcut", "keys": ["DOWN"], "focus": false },
-  "new_chat": { "type": "shortcut", "keys": ["CTRL_OR_CMD", "SHIFT", "L"], "focus": false },
-  "dictation": { "type": "shortcut", "keys": ["CTRL_OR_CMD", "SHIFT", "D"], "focus": false },
+  "up": { "type": "context_scroll", "direction": "up" },
+  "down": { "type": "context_scroll", "direction": "down" },
+  "legacy_right": { "type": "shortcut", "keys": ["CTRL", "]"], "focus": false },
+  "legacy_left": { "type": "shortcut", "keys": ["CTRL", "["], "focus": false },
+  "legacy_center": { "type": "shortcut", "keys": ["CTRL", "SHIFT", "P"], "focus": false },
+  "legacy_fast": { "type": "slash", "command": "/fast", "focus": true },
+  "new_chat": { "type": "new_chat" },
+  "dictation": {
+    "type": "microphone",
+    "keys": ["CTRL_OR_CMD", "SHIFT", "D"]
+  },
   "send": { "type": "shortcut", "keys": ["ENTER"], "focus": false }
 }

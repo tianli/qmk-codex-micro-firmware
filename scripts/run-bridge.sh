@@ -13,5 +13,5 @@ if [ ! -d "$REPO_ROOT/.venv" ]; then
 fi
 
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
-echo "Starting MF17 Jetski Bridge..."
+echo "Starting MF17 Codex/Antigravity Bridge..."
 exec "$PYTHON_BIN" "$REPO_ROOT/host/mf17_bridge.py" "$@"

@@ -2,6 +2,7 @@ import json
 import unittest
 
 from host.jetski_status_hook import event_to_status
+from host.codex_status_hook import status_message
 
 
 class HookStatusTests(unittest.TestCase):
@@ -84,6 +85,73 @@ class HookStatusTests(unittest.TestCase):
         self.assertEqual(event_to_status({"hook_event_name": "SessionEnd"}), ("off", True))
         self.assertEqual(event_to_status({"hook_event_name": "PostToolUse", "tool_response": {"exit_code": 1}}), ("error", False))
         self.assertEqual(event_to_status({"hook_event_name": "PreToolUse", "tool_name": "functions__request_user_input"}), ("waiting", False))
+
+    def test_codex_status_message_is_provider_tagged(self):
+        message = status_message({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "codex-session-123",
+            "cwd": "C:/work",
+            "transcript_path": "C:/work/transcript.jsonl",
+        })
+        self.assertEqual(message["kind"], "codex_status")
+        self.assertEqual(message["provider"], "codex")
+        self.assertEqual(message["session_id"], "codex-session-123")
+        self.assertEqual(message["status"], "thinking")
+        self.assertFalse(message["remove"])
+
+    def test_interactive_tool_name_variants_are_waiting(self):
+        for tool_name in (
+            "request_user_input",
+            "functions.request_user_input",
+            "functions__request_user_input",
+            "mcp/request_user_input",
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual(
+                    event_to_status({"tool_name": tool_name}, explicit_event="PreToolUse"),
+                    ("waiting", False),
+                )
+
+    def test_stop_awaiting_user_input_is_waiting_not_complete(self):
+        self.assertEqual(
+            event_to_status(
+                {"termination_reason": "awaiting_user_input"},
+                explicit_event="Stop",
+            ),
+            ("waiting", False),
+        )
+        self.assertEqual(
+            event_to_status(
+                {"waiting_for_user": True, "terminationReason": "model_stop"},
+                explicit_event="Stop",
+            ),
+            ("waiting", False),
+        )
+
+    def test_stop_final_assistant_question_is_waiting(self):
+        self.assertEqual(
+            event_to_status(
+                {"last_assistant_message": "Which option should I use?"},
+                explicit_event="Stop",
+            ),
+            ("waiting", False),
+        )
+        self.assertEqual(
+            event_to_status(
+                {"last_assistant_message": "Please provide the target directory."},
+                explicit_event="Stop",
+            ),
+            ("waiting", False),
+        )
+
+    def test_stop_normal_final_answer_remains_complete(self):
+        self.assertEqual(
+            event_to_status(
+                {"last_assistant_message": "Implemented the change and verified the tests."},
+                explicit_event="Stop",
+            ),
+            ("complete", False),
+        )
 
 
 if __name__ == "__main__":

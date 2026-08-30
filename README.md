@@ -1,6 +1,6 @@
-# MF17 Jetski Keypad Controller
+# MF17 Codex / Antigravity Keypad Controller
 
-This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated physical control surface for **Jetski** with **10 Agent status channels**.
+This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated physical control surface for **Codex and Antigravity** with **10 task status channels**. The bridge accepts both providers on the same UDP protocol and routes task selection to the appropriate desktop deep link.
 
 ---
 
@@ -8,7 +8,7 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 
 ```text
 +-------------------+-------------------+-------------------+-------------------+
-|      Approve      |      Reject       |        UP         |       DOWN        |
+|      Approve      |      Reject       |      Page Up      |     Page Down     |
 |      (Top 1)      |      (Top 2)      |      (Top 3)      |      (Top 4)      |
 +-------------------+-------------------+-------------------+-------------------+
 |      Agent 7      |      Agent 8      |      Agent 9      |     New Chat      |
@@ -27,13 +27,13 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 
 ### Controls
 
-- **Agent 1 – 9, Agent 0** (Keys `1` through `9`, and Key `0`): Selects and focuses that conversation in Jetski. The physical LED under each numeric key reflects that task's live status.
+- **Agent 0 – 9** (Keys `0` through `9`): Key `0` selects the most recent active conversation, Key `1` selects the next most recent, continuing in order through Key `9`. Codex slots follow the desktop app's active-task recency and exclude archived, voice-only, guardian, reviewer, and subagent threads. The physical LED under each numeric key reflects that task's live status.
 - **Top Row Left (Top 1)**: **Approve** (`Enter`) to confirm tool permissions or choices.
 - **Top Row Mid-Left (Top 2)**: **Reject** (`Escape`) to decline tool execution or dismiss prompts.
-- **Top Row Mid-Right (Top 3)**: **UP Arrow** (`Up`) to navigate selection menus.
-- **Top Row Right (Top 4)**: **DOWN Arrow** (`Down`) to navigate selection menus.
-- **New Chat** (`+` key): Start a new conversation in Jetski (`Cmd+Shift+L`).
-- **Dictate / Mic** (`.` key): Activate microphone / dictation (`Cmd+Shift+D`).
+- **Top Row Mid-Right (Top 3)**: Context-aware Page Up. The bridge detects a terminal foreground window and sends `Shift+Page Up`; in the Codex desktop thread it sends plain `Page Up`.
+- **Top Row Right (Top 4)**: Context-aware Page Down, using the matching terminal (`Shift+Page Down`) or desktop (`Page Down`) behavior.
+- **New Chat** (`+` key): In Codex, opens the command palette's stable **New chat** command; other supported hosts retain the legacy `Cmd/Ctrl+Shift+L` fallback.
+- **Voice / Mic** (`.` key): Sends the Voice shortcut configured in Codex/ChatGPT Desktop Settings, even when a terminal has focus. The app has no documented default Voice shortcut; configure `Ctrl+Shift+D` in the app, or set `MF17_VOICE_KEYS` to the comma-separated shortcut you chose. Set `MF17_SCROLL_CONTEXT=terminal` or `desktop` to override terminal detection.
 - **Send** (`Enter` key): Submit the current prompt or input (`Enter`).
 
 ### Agent Status LED Colors
@@ -63,13 +63,24 @@ python3 -m venv .venv
 
 ---
 
-### 2. Enable Jetski Lifecycle Hooks
+### 2. Enable lifecycle hooks
 
-Install the lifecycle hooks into your global Jetski configuration (`~/.gemini/config/hooks.json`):
+For Antigravity/Jetski, install the lifecycle hooks into `~/.gemini/config/hooks.json`:
 
 ```bash
 ./scripts/install-jetski-hooks.sh
 ```
+
+For Codex, install the provider-tagged hooks into `~/.codex/hooks.json`:
+
+```powershell
+./scripts/install-global-hooks.ps1
+```
+
+Both hook adapters send status-only UDP packets to the bridge and preserve the
+native approval/prompt behavior of their host application. Codex task IDs are
+opened with `codex://threads/<id>`; Antigravity task IDs use
+`jetski-ide://conversation/<id>`.
 
 ---
 
@@ -77,6 +88,14 @@ Install the lifecycle hooks into your global Jetski configuration (`~/.gemini/co
 
 ```bash
 ./scripts/run-bridge.sh
+```
+
+On Windows, if you launch the bridge from a Codex command runner, use the
+interactive-desktop launcher so its key events reach the visible Codex or
+Antigravity window:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run-bridge-interactive.py
 ```
 
 To run automatically in the background at system boot:
@@ -97,11 +116,38 @@ To run automatically in the background at system boot:
   python3 scripts/clear-slots.py 2 3
   ```
 
+### 5. Per-key lighting API
+
+The firmware exposes a versioned Raw HID v2 API that can override the RGB
+backlight on every physical key, including Agent keys. The bridge accepts
+logical key names and maps them to the correct MF17 LED automatically:
+
+```bash
+python scripts/set-lighting.py key agent_1 255 0 0
+python scripts/set-lighting.py key approve 0 255 0
+python scripts/set-lighting.py all 32 0 80
+python scripts/set-lighting.py clear
+```
+
+Existing bridges remain compatible with the original LED-index commands. The
+new bridge capability-probes the firmware and falls back to those messages
+when it connects to an older image. See
+[`docs/lighting-api.md`](docs/lighting-api.md) for the JSON and Raw HID APIs,
+logical key IDs, batching, acknowledgements, and precedence rules.
+
 ---
 
 ## Building & Flashing Firmware
 
 The source code for the 10-agent keymap is in [`firmware/keymaps/codex_micro/keymap.c`](firmware/keymaps/codex_micro/keymap.c).
+
+The included v2 API image is
+[`firmware/magic_force_mf17_codex_micro.bin`](firmware/magic_force_mf17_codex_micro.bin).
+It is 47,024 bytes with SHA-256:
+
+```text
+1DEC2693839C97836BCAC9147952359ECA29E33E0D90176D36E8FA141122FF1C
+```
 
 To compile and flash using QMK:
 

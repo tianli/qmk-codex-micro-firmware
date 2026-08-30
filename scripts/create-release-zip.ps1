@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $DistRoot = Join-Path $RepoRoot 'dist'
-$PackageName = "mf17-codex-micro-windows11-$Version"
+$PackageName = "qmk-codex-micro-firmware-repo-update-$Version"
 $StageRoot = Join-Path $DistRoot (".stage-{0}" -f $PID)
 $PackageRoot = Join-Path $StageRoot $PackageName
 $ZipPath = Join-Path $DistRoot "$PackageName.zip"
@@ -23,12 +23,12 @@ if (Test-Path -LiteralPath $StageRoot) {
 }
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 
-$RootFiles = @('.gitignore', 'README.md')
+$RootFiles = @('.gitignore', 'README.md', 'REPO_UPDATE_INSTRUCTIONS.md')
 foreach ($RelativePath in $RootFiles) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot $RelativePath) -Destination $PackageRoot
 }
 
-$Directories = @('.codex', 'firmware', 'host', 'scripts', 'tests')
+$Directories = @('.codex', 'docs', 'firmware', 'host', 'scripts', 'tests')
 foreach ($Directory in $Directories) {
     $Destination = Join-Path $PackageRoot $Directory
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
