@@ -235,18 +235,14 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"permissionrequest", "permission_request"}:
         return "waiting", False
 
-    # PreToolUse: Agent is about to execute a tool (or prompt the user for permission)
+    # PreToolUse: Agent is about to execute a tool
     if name in {"pretooluse", "pre_tool_use"}:
         tool_name = _tool_name(event)
         
-        # If the tool is a permission/interactive tool or contains matching keywords -> amber waiting
-        if (
-            _is_interactive_tool(tool_name)
-            or "command" in _base_tool_name(tool_name)
-            or "write" in _base_tool_name(tool_name)
-            or "replace" in _base_tool_name(tool_name)
-        ):
+        # If the tool is an interactive user-facing question or permission tool -> amber waiting
+        if _is_interactive_tool(tool_name):
             return "waiting", False
+        # Commands, tests, file writes, and evaluations -> blue thinking
         return "thinking", False
 
     # PostToolUse: Tool completed execution
@@ -267,12 +263,7 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     # Fallback inspection if event name wasn't explicitly supplied
     if any(key in event for key in ("toolCall", "tool_call", "tool_name", "toolName", "tool")):
         tool_name = _tool_name(event)
-        if (
-            _is_interactive_tool(tool_name)
-            or "command" in _base_tool_name(tool_name)
-            or "write" in _base_tool_name(tool_name)
-            or "replace" in _base_tool_name(tool_name)
-        ):
+        if _is_interactive_tool(tool_name):
             return "waiting", False
         return "thinking", False
 

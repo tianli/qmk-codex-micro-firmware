@@ -456,12 +456,27 @@ class SessionSlots:
         return existing
 
     def populate_recent(self, session_ids: list[str], providers: dict[str, str] | None = None) -> bool:
-        """Map recency ranks to numeric keys 0..9 and remove stale tasks."""
+        """Map recency ranks to numeric keys 0..9 and remove stale tasks while preserving active remote sessions."""
         previous_by_id = {
             item["session_id"]: item for item in self.slots if item
         }
+
+        # Retain active remote/hook sessions that may not be on the local filesystem (e.g. Cloudtop)
+        all_candidate_ids = list(session_ids)
+        for prev_id, prev_item in sorted(
+            previous_by_id.items(),
+            key=lambda x: x[1].get("updated", 0),
+            reverse=True,
+        ):
+            if (
+                prev_id not in all_candidate_ids
+                and prev_item.get("last_hook_time", 0) > 0
+                and prev_item.get("status") in {"thinking", "waiting"}
+            ):
+                all_candidate_ids.append(prev_id)
+
         new_slots: list[dict[str, Any] | None] = [None] * AGENT_SLOT_COUNT
-        for rank, session_id in enumerate(session_ids[:AGENT_SLOT_COUNT]):
+        for rank, session_id in enumerate(all_candidate_ids[:AGENT_SLOT_COUNT]):
             slot = RECENT_RANK_TO_SLOT[rank]
             previous = previous_by_id.get(session_id)
             if previous:
@@ -483,9 +498,9 @@ class SessionSlots:
             item["session_id"] if item else None for item in new_slots
         ]
         self.slots = new_slots
-        desired_ids = set(session_ids[:AGENT_SLOT_COUNT])
+        desired_ids = set(all_candidate_ids[:AGENT_SLOT_COUNT])
         if self.active_session not in desired_ids:
-            self.active_session = session_ids[0] if session_ids else None
+            self.active_session = all_candidate_ids[0] if all_candidate_ids else None
         return changed
 
 
