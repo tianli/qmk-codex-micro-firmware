@@ -329,12 +329,40 @@ def main() -> int:
 
     status, remove = event_to_status(payload, explicit_event=args.event)
     
-    session_id = str(
+    parent_id = str(
+        payload.get("parentConversationId")
+        or payload.get("parent_conversation_id")
+        or payload.get("parentId")
+        or payload.get("parent_id")
+        or ""
+    ).strip()
+
+    raw_session_id = str(
         payload.get("conversationId")
         or payload.get("conversation_id")
         or payload.get("session_id")
         or "unknown"
+    ).strip()
+
+    is_subagent = bool(
+        parent_id
+        or payload.get("isSubagent")
+        or payload.get("subagentName")
+        or (args.event and "subagent" in args.event.lower())
     )
+
+    # Option 1: Route subagent status directly into the parent conversation's key slot
+    if parent_id and parent_id != raw_session_id:
+        session_id = parent_id
+        # Subagent stopping does not remove the parent slot
+        if is_subagent:
+            remove = False
+    else:
+        session_id = raw_session_id
+        # If an unparented subagent completes, immediately clear its slot
+        if is_subagent and status in {"complete", "off"}:
+            remove = True
+
     transcript_path = str(payload.get("transcriptPath") or payload.get("transcript_path") or "")
 
     message = {

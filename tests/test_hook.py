@@ -146,15 +146,23 @@ class HookStatusTests(unittest.TestCase):
             ("waiting", False),
         )
 
-    def test_stop_normal_final_answer_remains_complete(self):
+    def test_subagent_lifecycle_mapping(self):
+        # Subagent starting / running should report thinking
         self.assertEqual(
-            event_to_status(
-                {"last_assistant_message": "Implemented the change and verified the tests."},
-                explicit_event="Stop",
-            ),
+            event_to_status({"isSubagent": True}, explicit_event="SubagentStart"),
+            ("thinking", False),
+        )
+        self.assertEqual(
+            event_to_status({"subagentName": "research"}, explicit_event="PreInvocation"),
+            ("thinking", False),
+        )
+        # Subagent stop without error
+        self.assertEqual(
+            event_to_status({"isSubagent": True}, explicit_event="SubagentStop"),
             ("complete", False),
         )
 
 
 if __name__ == "__main__":
     unittest.main()
+
