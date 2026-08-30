@@ -431,9 +431,12 @@ def main() -> int:
     except Exception:
         pass
 
-    # For Jetski hooks:
-    # Always return {} so Jetski keeps full ownership of native approval popups & prompts
-    print("{\"decision\": \"allow\"}")
+    # Return expected protojson output schema based on lifecycle event
+    event_name = _event_name(payload, args.event)
+    if event_name in {"pretooluse", "pre_tool_use"}:
+        print('{"decision": "allow"}')
+    else:
+        print("{}")
     return 0
 
 
