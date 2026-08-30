@@ -486,11 +486,32 @@ class SessionSlots:
 
         return None
 
-    def populate_recent(self, session_ids: list[str], providers: dict[str, str] | None = None) -> bool:
-        """Map recency ranks to numeric keys 0..9 and remove stale tasks while preserving active remote sessions."""
+    def populate_recent(
+        self,
+        session_ids: list[str],
+        providers: dict[str, str] | None = None,
+        active_only: bool = False,
+    ) -> bool:
+        """Map recency ranks to numeric keys 0..9 while preserving active sessions."""
         previous_by_id = {
             item["session_id"]: item for item in self.slots if item
         }
+
+        if active_only:
+            # Only keep sessions with live runtime activity (last_hook_time > 0 and status != "off")
+            new_slots: list[dict[str, Any] | None] = [None] * AGENT_SLOT_COUNT
+            for slot, item in enumerate(self.slots):
+                if item and item.get("last_hook_time", 0) > 0 and item.get("status") not in {"off"}:
+                    new_slots[slot] = item
+            
+            changed = [item["session_id"] if item else None for item in self.slots] != [
+                item["session_id"] if item else None for item in new_slots
+            ]
+            self.slots = new_slots
+            active_ids = {item["session_id"] for item in self.slots if item}
+            if self.active_session not in active_ids:
+                self.active_session = next(iter(active_ids), None)
+            return changed
 
         # Retain active remote/hook sessions that may not be on the local filesystem (e.g. Cloudtop)
         all_candidate_ids = list(session_ids)
@@ -1008,12 +1029,19 @@ class OSController:
 
 
 class Bridge:
-    def __init__(self, actions_path: Path, dry_run: bool = False, provider: str | None = None) -> None:
+    def __init__(
+        self,
+        actions_path: Path,
+        dry_run: bool = False,
+        provider: str | None = None,
+        active_only: bool = True,
+    ) -> None:
         self.actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.sessions = SessionSlots()
         self.controller = OSController(self.sessions)
         self.device: Any = None
         self.dry_run = dry_run
+        self.active_only = active_only
         self.udp_socket: socket.socket | None = None
         self.last_session_scan = 0.0
         self.session_files: dict[str, Path] = {}
@@ -1034,6 +1062,17 @@ class Bridge:
                 stream.write(f"{timestamp} {message}\n")
         except OSError:
             pass
+
+    def find_transcript_for_session(self, session_id: str) -> Path | None:
+        jetski_brain = Path.home() / ".gemini" / "jetski" / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if jetski_brain.exists():
+            return jetski_brain
+        codex_path = Path.home() / ".codex" / "sessions"
+        if codex_path.exists():
+            for p in codex_path.rglob(f"*{session_id}*.jsonl"):
+                if p.exists():
+                    return p
+        return None
 
     def find_recent_sessions(self) -> list[tuple[str, Path, str]]:
         results: list[tuple[str, Path, str]] = []
@@ -1098,6 +1137,33 @@ class Bridge:
         return results
 
     def refresh_recent_sessions(self) -> None:
+        if self.active_only:
+            if self.sessions.populate_recent([], active_only=True):
+                self.sync_leds()
+
+            for item in self.sessions.slots:
+                if not item:
+                    continue
+                sid = item["session_id"]
+                if sid not in self.session_files:
+                    path = self.find_transcript_for_session(sid)
+                    if path:
+                        self.session_files[sid] = path
+                        self.session_providers[sid] = item.get("provider", PROVIDER_ANTIGRAVITY)
+
+            for session_id, path in list(self.session_files.items()):
+                state = latest_transcript_state(path)
+                if state is None:
+                    continue
+                slot = self.sessions.reconcile_terminal(session_id, state)
+                if slot is not None:
+                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
+                    self.log(
+                        f"reconciled session={session_id} state={state} "
+                        f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+                    )
+            return
+
         recent = self.find_recent_sessions()
         session_ids: list[str] = []
         providers: dict[str, str] = {}
@@ -1109,7 +1175,7 @@ class Bridge:
         self.session_files = session_files
         self.session_providers = providers
 
-        if self.sessions.populate_recent(session_ids, providers=providers):
+        if self.sessions.populate_recent(session_ids, providers=providers, active_only=False):
             self.sync_leds()
             self.log("loaded numeric task slots: " + ", ".join(
                 f"{NUMERIC_KEY_BY_SLOT[slot]}={item['session_id']}"
@@ -1377,13 +1443,30 @@ def main() -> int:
         help="active application provider (jetski, codex, or auto)",
     )
     parser.add_argument(
+        "--active-only",
+        action="store_true",
+        default=True,
+        help="only allocate slots for actively open/running sessions (default: True)",
+    )
+    parser.add_argument(
+        "--include-history",
+        dest="active_only",
+        action="store_false",
+        help="pre-populate slots with the 10 most recent past sessions from disk",
+    )
+    parser.add_argument(
         "--actions",
         type=Path,
         default=Path(__file__).with_name("actions.json"),
     )
     args = parser.parse_args()
     while True:
-        bridge = Bridge(args.actions, dry_run=args.dry_run, provider=args.provider)
+        bridge = Bridge(
+            args.actions,
+            dry_run=args.dry_run,
+            provider=args.provider,
+            active_only=args.active_only,
+        )
         try:
             bridge.run()
         except KeyboardInterrupt:

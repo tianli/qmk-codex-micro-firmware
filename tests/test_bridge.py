@@ -157,6 +157,21 @@ class SessionSlotTests(unittest.TestCase):
             [item["session_id"] for item in slots.slots if item],
         )
 
+    def test_active_only_mode_keeps_only_live_hook_sessions(self):
+        slots = SessionSlots()
+        # Active only mode on empty slots does not load disk history
+        self.assertFalse(slots.populate_recent(["past_session_1", "past_session_2"], active_only=True))
+        self.assertIsNone(slots.session_for_slot(0))
+        self.assertIsNone(slots.session_for_slot(1))
+
+        # Dynamic live hook assigns slot 0
+        slots.update("live_session", "thinking", from_hook=True)
+        self.assertEqual(slots.session_for_slot(0), "live_session")
+
+        # populate_recent in active_only preserves live session
+        self.assertFalse(slots.populate_recent([], active_only=True))
+        self.assertEqual(slots.session_for_slot(0), "live_session")
+
     def test_terminal_reconciliation_respects_recent_hook(self):
         slots = SessionSlots()
         slots.update("session_working", "thinking", from_hook=True)
