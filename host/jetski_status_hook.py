@@ -211,7 +211,7 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
             if p.exists():
                 with open(p, "rb") as f:
                     size = f.seek(0, 2)
-                    f.seek(max(0, size - 65536))
+                    f.seek(max(0, size - 512 * 1024))
                     lines = f.readlines()
                 for line in reversed(lines):
                     try:
