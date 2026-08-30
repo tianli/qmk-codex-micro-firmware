@@ -458,7 +458,7 @@ class SessionSlots:
         return normalize_provider(item.get("provider") if item else None)
 
     def reconcile_terminal(self, session_id: str, status: str) -> int | None:
-        """Promote active sessions to waiting if a question is pending in transcript, or resolve stale thinking."""
+        """Resolve a stale thinking state ONLY when an active session was left in thinking state."""
         existing = next(
             (index for index, item in enumerate(self.slots) if item and item["session_id"] == session_id),
             None,
@@ -467,25 +467,22 @@ class SessionSlots:
             return None
 
         current_status = self.slots[existing]["status"]
-        if current_status in {"off", "idle"}:
+        if current_status != "thinking":
             return None
 
         now = time.time()
-        # Promote active sessions to waiting immediately if a question/prompt was detected in transcript
+        # If the session is actively thinking and a waiting signal was found in transcript:
         if status == "waiting":
-            if current_status != "waiting":
-                self.slots[existing]["status"] = "waiting"
-                self.slots[existing]["updated"] = now
-                return existing
-            return None
+            self.slots[existing]["status"] = "waiting"
+            self.slots[existing]["updated"] = now
+            return existing
 
-        # Resolve stale thinking
-        if current_status == "thinking":
-            last_hook = self.slots[existing].get("last_hook_time", 0)
-            if (now - last_hook) >= STALE_THINKING_TIMEOUT_SECS:
-                self.slots[existing]["status"] = status
-                self.slots[existing]["updated"] = now
-                return existing
+        # Resolve stale thinking after timeout
+        last_hook = self.slots[existing].get("last_hook_time", 0)
+        if (now - last_hook) >= STALE_THINKING_TIMEOUT_SECS:
+            self.slots[existing]["status"] = status
+            self.slots[existing]["updated"] = now
+            return existing
 
         return None
 
