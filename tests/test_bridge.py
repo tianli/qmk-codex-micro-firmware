@@ -1,4 +1,5 @@
 import json
+import os
 import ctypes
 from pathlib import Path
 import sqlite3
@@ -171,6 +172,22 @@ class SessionSlotTests(unittest.TestCase):
         # populate_recent in active_only preserves live session
         self.assertFalse(slots.populate_recent([], active_only=True))
         self.assertEqual(slots.session_for_slot(0), "live_session")
+
+    def test_is_pid_alive(self):
+        from host.mf17_bridge import is_pid_alive
+        self.assertTrue(is_pid_alive(os.getpid()))
+        self.assertTrue(is_pid_alive(None))
+        self.assertTrue(is_pid_alive(0))
+        self.assertFalse(is_pid_alive(99999999))
+
+    def test_refresh_recent_sessions_cleans_terminated_pid(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True, active_only=True)
+        bridge.sessions.update("dead_proc_session", "complete", from_hook=True, pid=99999999)
+        self.assertEqual(bridge.sessions.session_for_slot(0), "dead_proc_session")
+
+        # Running refresh_recent_sessions should detect dead PID and clear slot
+        bridge.refresh_recent_sessions()
+        self.assertIsNone(bridge.sessions.session_for_slot(0))
 
     def test_terminal_reconciliation_respects_recent_hook(self):
         slots = SessionSlots()

@@ -385,6 +385,10 @@ def main() -> int:
             remove = True
 
     transcript_path = str(payload.get("transcriptPath") or payload.get("transcript_path") or "")
+    
+    import os
+    ppid = os.getppid()
+    is_remote = bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"))
 
     message = {
         "kind": "jetski_status",
@@ -394,6 +398,8 @@ def main() -> int:
         "remove": remove,
         "transcript_path": transcript_path,
         "event": args.event or payload.get("hook_event_name") or "",
+        "pid": ppid,
+        "is_remote": is_remote,
     }
 
     try:

@@ -403,6 +403,19 @@ def latest_transcript_state(path: Path) -> str | None:
     return None
 
 
+def is_pid_alive(pid: int | None) -> bool:
+    """Check if a process ID is currently running on the local system."""
+    if not pid or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 class SessionSlots:
     def __init__(self) -> None:
         self.slots: list[dict[str, Any] | None] = [None] * AGENT_SLOT_COUNT
@@ -415,6 +428,8 @@ class SessionSlots:
         remove: bool = False,
         from_hook: bool = True,
         provider: str | None = None,
+        pid: int | None = None,
+        is_remote: bool = False,
     ) -> int | None:
         now = time.time()
         existing = next(
@@ -445,6 +460,8 @@ class SessionSlots:
                 provider,
                 previous.get("provider", PROVIDER_ANTIGRAVITY) if previous else PROVIDER_ANTIGRAVITY,
             ),
+            "pid": pid if pid is not None else previous.get("pid") if previous else None,
+            "is_remote": is_remote if is_remote else previous.get("is_remote", False) if previous else False,
         }
         self.active_session = session_id
         return existing
@@ -1137,6 +1154,16 @@ class Bridge:
         return results
 
     def refresh_recent_sessions(self) -> None:
+        # Check if any active local session's parent process (Jetski window / CLI) has terminated
+        for slot, item in enumerate(list(self.sessions.slots)):
+            if item and item.get("status") not in {"off"} and not item.get("is_remote", False):
+                pid = item.get("pid")
+                if pid and not is_pid_alive(pid):
+                    sid = item["session_id"]
+                    self.sessions.update(sid, "off", remove=True)
+                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+                    self.log(f"session {sid} window (PID {pid}) closed -> turned off slot {slot}")
+
         if self.active_only:
             if self.sessions.populate_recent([], active_only=True):
                 self.sync_leds()
@@ -1247,12 +1274,16 @@ class Bridge:
             or payload.get("conversation_id")
             or "unknown"
         )
+        pid = payload.get("pid")
+        is_remote = bool(payload.get("is_remote", False))
         slot = self.sessions.update(
             session_id,
             status,
             bool(payload.get("remove", False)),
             from_hook=True,
             provider=provider,
+            pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
+            is_remote=is_remote,
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
