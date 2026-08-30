@@ -211,14 +211,19 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
             if p.exists():
                 with open(p, "rb") as f:
                     size = f.seek(0, 2)
-                    f.seek(max(0, size - 32768))
+                    f.seek(max(0, size - 65536))
                     lines = f.readlines()
                 for line in reversed(lines):
                     try:
                         rec = json.loads(line)
-                        content = rec.get("content") or rec.get("text")
-                        if isinstance(content, str) and content.strip():
-                            return content.strip()
+                        if (
+                            rec.get("type") in {"PLANNER_RESPONSE", "assistant_message", "message"}
+                            or rec.get("role") == "assistant"
+                            or (rec.get("source") == "MODEL" and rec.get("type") != "GENERIC")
+                        ):
+                            content = rec.get("content") or rec.get("text")
+                            if isinstance(content, str) and content.strip():
+                                return content.strip()
                     except Exception:
                         continue
         except Exception:
