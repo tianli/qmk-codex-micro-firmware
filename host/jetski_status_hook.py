@@ -112,6 +112,15 @@ def _base_tool_name(tool_name: str) -> str:
     return name
 
 
+PERMISSION_REQUIRED_TOOLS = {
+    "run_command",
+    "write_to_file",
+    "replace_file_content",
+    "notebook_edit",
+    "ask_custom_permission",
+}
+
+
 def _is_interactive_tool(tool_name: str) -> bool:
     base_tool = _base_tool_name(tool_name)
     compact = base_tool.replace("_", "")
@@ -119,6 +128,16 @@ def _is_interactive_tool(tool_name: str) -> bool:
         base_tool in PERMISSION_TOOL_NAMES
         or compact in PERMISSION_TOOL_NAMES
         or any(marker in base_tool for marker in WAITING_NAME_MARKERS)
+    )
+
+
+def _is_permission_tool(tool_name: str) -> bool:
+    base_tool = _base_tool_name(tool_name)
+    compact = base_tool.replace("_", "")
+    return (
+        base_tool in PERMISSION_REQUIRED_TOOLS
+        or compact in PERMISSION_REQUIRED_TOOLS
+        or _is_interactive_tool(tool_name)
     )
 
 
@@ -267,10 +286,10 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"pretooluse", "pre_tool_use"}:
         tool_name = _tool_name(event)
         
-        # If the tool is an interactive user-facing question or permission tool -> amber waiting
-        if _is_interactive_tool(tool_name):
+        # If the tool requires permission or is an interactive question -> amber waiting
+        if _is_permission_tool(tool_name):
             return "waiting", False
-        # Commands, tests, file writes, and evaluations -> blue thinking
+        # Silent read tools (view_file, list_dir, grep_search) -> blue thinking
         return "thinking", False
 
     # PostToolUse: Tool completed execution
