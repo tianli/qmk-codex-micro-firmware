@@ -290,7 +290,7 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         last_msg = _get_last_assistant_message(event)
         if _looks_like_user_prompt(last_msg):
             return "waiting", False
-        return "thinking", False
+        return "complete", False
 
     # Fallback inspection if event name wasn't explicitly supplied
     if any(key in event for key in ("toolCall", "tool_call", "tool_name", "toolName", "tool")):

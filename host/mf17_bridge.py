@@ -471,7 +471,7 @@ class SessionSlots:
             if (
                 prev_id not in all_candidate_ids
                 and prev_item.get("last_hook_time", 0) > 0
-                and prev_item.get("status") in {"thinking", "waiting"}
+                and prev_item.get("status") not in {"off"}
             ):
                 all_candidate_ids.append(prev_id)
 
