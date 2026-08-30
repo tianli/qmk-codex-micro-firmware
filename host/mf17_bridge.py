@@ -430,6 +430,7 @@ class SessionSlots:
         provider: str | None = None,
         pid: int | None = None,
         is_remote: bool = False,
+        workspace: str | None = None,
     ) -> int | None:
         now = time.time()
         existing = next(
@@ -462,6 +463,7 @@ class SessionSlots:
             ),
             "pid": pid if pid is not None else previous.get("pid") if previous else None,
             "is_remote": is_remote if is_remote else previous.get("is_remote", False) if previous else False,
+            "workspace": workspace if workspace else previous.get("workspace", "") if previous else "",
         }
         self.active_session = session_id
         return existing
@@ -870,10 +872,46 @@ class OSController:
         """Activate Codex or Antigravity and focus the selected conversation."""
         provider = normalize_provider(provider)
         uri = conversation_uri(session_id, provider) if session_id else None
+        workspace_name = ""
+        if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
+            workspace_name = str(self.sessions.slots[slot].get("workspace") or "")
+
         if self.is_mac:
             if provider == PROVIDER_ANTIGRAVITY:
+                script = f"""
+                try
+                    tell application id "com.google.jetski" to activate
+                end try
+                tell application "System Events"
+                    repeat with p in (every process whose name is "Electron" or name is "Jetski" or bundle identifier is "com.google.jetski")
+                        set frontmost of p to true
+                        set targetWin to missing value
+                        if "{workspace_name}" is not "" then
+                            repeat with w in (every window of p)
+                                if name of w contains "{workspace_name}" then
+                                    set targetWin to w
+                                    exit repeat
+                                end if
+                            end repeat
+                        end if
+                        if targetWin is missing value and (count of windows of p) > 0 then
+                            set targetWin to window 1 of p
+                        end if
+                        if targetWin is not missing value then
+                            try
+                                tell p to perform action "AXRaise" of targetWin
+                            end try
+                        end if
+                    end repeat
+                end tell
+                """
                 try:
-                    subprocess.run(["open", "-b", "com.google.jetski"], capture_output=True, timeout=1.5)
+                    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
+                except Exception:
+                    pass
+            elif provider == PROVIDER_CODEX:
+                try:
+                    subprocess.run(["osascript", "-e", 'tell application "Codex" to activate'], capture_output=True, timeout=1.5)
                 except Exception:
                     pass
             if uri:
@@ -1276,6 +1314,7 @@ class Bridge:
         )
         pid = payload.get("pid")
         is_remote = bool(payload.get("is_remote", False))
+        workspace = str(payload.get("workspace") or "")
         slot = self.sessions.update(
             session_id,
             status,
@@ -1284,6 +1323,7 @@ class Bridge:
             provider=provider,
             pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
             is_remote=is_remote,
+            workspace=workspace,
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])

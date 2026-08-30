@@ -390,6 +390,13 @@ def main() -> int:
     ppid = os.getppid()
     is_remote = bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"))
 
+    workspace_paths = payload.get("workspacePaths") or payload.get("workspace_paths") or []
+    workspace_name = ""
+    if workspace_paths and isinstance(workspace_paths, list):
+        first_wp = str(workspace_paths[0])
+        if first_wp:
+            workspace_name = os.path.basename(first_wp.rstrip("/\\"))
+
     message = {
         "kind": "jetski_status",
         "provider": "antigravity",
@@ -400,6 +407,7 @@ def main() -> int:
         "event": args.event or payload.get("hook_event_name") or "",
         "pid": ppid,
         "is_remote": is_remote,
+        "workspace": workspace_name,
     }
 
     try:
