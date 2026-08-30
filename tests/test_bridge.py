@@ -1,11 +1,15 @@
 import json
+import ctypes
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 import unittest
 
 from host.mf17_bridge import (
     Bridge,
+    active_codex_sessions,
+    archived_codex_session_ids,
     CAP_LOGICAL_KEYS,
     KEY_COUNT,
     MSG_CAPABILITIES,
@@ -20,15 +24,108 @@ from host.mf17_bridge import (
     PROVIDER_CODEX,
     PROVIDER_ANTIGRAVITY,
     PROTOCOL_VERSION,
+    POINT,
+    RECT,
+    root_codex_session_id,
     SessionSlots,
     STATUS_IDS,
     conversation_uri,
     latest_transcript_state,
+    visible_codex_session_ids,
 )
 from host.lighting_api import LEGACY_LED_BY_KEY, resolve_key
 
 
 class SessionSlotTests(unittest.TestCase):
+    def test_active_codex_sessions_exclude_archived_and_internal_tasks(self):
+        active_id = "11111111-1111-1111-1111-111111111111"
+        archived_id = "22222222-2222-2222-2222-222222222222"
+        internal_id = "33333333-3333-3333-3333-333333333333"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active_rollout = root / f"rollout-{active_id}.jsonl"
+            archived_rollout = root / f"rollout-{archived_id}.jsonl"
+            internal_rollout = root / f"rollout-{internal_id}.jsonl"
+            for path in (active_rollout, archived_rollout, internal_rollout):
+                path.write_text("{}\n", encoding="utf-8")
+
+            state = root / "state.sqlite"
+            connection = sqlite3.connect(state)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads ("
+                    "id TEXT, rollout_path TEXT, archived INTEGER, source TEXT, "
+                    "thread_source TEXT, recency_at_ms INTEGER)"
+                )
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (archived_id, str(archived_rollout), 1, "vscode", "user", 300),
+                        (internal_id, str(internal_rollout), 0, "vscode", "subagent", 200),
+                        (active_id, str(active_rollout), 0, "vscode", "user", 100),
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertEqual(active_codex_sessions(state), [(active_id, active_rollout)])
+            self.assertEqual(archived_codex_session_ids(state, root / "missing"), {archived_id})
+
+    def test_visible_index_subtracts_legacy_archive_files(self):
+        visible_id = "11111111-1111-1111-1111-111111111111"
+        archived_id = "22222222-2222-2222-2222-222222222222"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "session_index.jsonl"
+            index.write_text(
+                json.dumps({"id": visible_id}) + "\n" + json.dumps({"id": archived_id}) + "\n",
+                encoding="utf-8",
+            )
+            archive = root / "archived_sessions"
+            archive.mkdir()
+            (archive / f"rollout-2026-01-01T00-00-00-{archived_id}.jsonl").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                visible_codex_session_ids(index, root / "missing.sqlite", archive),
+                {visible_id},
+            )
+
+    def test_desktop_index_and_metadata_exclude_internal_or_broken_tasks(self):
+        visible_id = "11111111-1111-1111-1111-111111111111"
+        child_id = "22222222-2222-2222-2222-222222222222"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "session_index.jsonl"
+            index.write_text(json.dumps({"id": visible_id}) + "\n", encoding="utf-8")
+            visible = visible_codex_session_ids(
+                index, root / "missing.sqlite", root / "missing_archive"
+            )
+
+            continuation = root / f"rollout_parent_{child_id}.jsonl"
+            continuation.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": visible_id,
+                    "session_id": visible_id,
+                    "source": "vscode",
+                    "thread_source": "user",
+                },
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(root_codex_session_id(continuation, visible), visible_id)
+
+            internal = root / "reviewer.jsonl"
+            internal.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": child_id,
+                    "source": {"subagent": {"other": "guardian"}},
+                    "thread_source": "subagent",
+                },
+            }) + "\n", encoding="utf-8")
+            self.assertIsNone(root_codex_session_id(internal, visible))
+
     def test_allocates_and_updates_ten_slots(self):
         slots = SessionSlots()
         for i in range(10):
@@ -45,9 +142,20 @@ class SessionSlotTests(unittest.TestCase):
     def test_recent_tasks_fill_empty_slots(self):
         slots = SessionSlots()
         self.assertTrue(slots.populate_recent(["session_1", "session_2"]))
-        self.assertEqual(slots.session_for_slot(0), "session_1")
-        self.assertEqual(slots.session_for_slot(1), "session_2")
+        self.assertEqual(slots.session_for_slot(9), "session_1")  # Key 0: most recent
+        self.assertEqual(slots.session_for_slot(0), "session_2")  # Key 1: next most recent
         self.assertFalse(slots.populate_recent(["session_1", "session_2"]))
+
+    def test_recent_refresh_reorders_and_removes_stale_tasks(self):
+        slots = SessionSlots()
+        slots.populate_recent(["old_recent", "old_second", "archived"])
+        self.assertTrue(slots.populate_recent(["new_recent", "old_recent"]))
+        self.assertEqual(slots.session_for_slot(9), "new_recent")
+        self.assertEqual(slots.session_for_slot(0), "old_recent")
+        self.assertNotIn(
+            "archived",
+            [item["session_id"] for item in slots.slots if item],
+        )
 
     def test_terminal_reconciliation_respects_recent_hook(self):
         slots = SessionSlots()
@@ -104,9 +212,10 @@ class LightingProtocolTests(unittest.TestCase):
 
     def test_capability_report_enables_v2(self):
         self.bridge.process_hid_report(
-            [MSG_CAPABILITIES, 0, PROTOCOL_VERSION, KEY_COUNT, CAP_LOGICAL_KEYS, 0, 7]
+            [MSG_CAPABILITIES, 0, PROTOCOL_VERSION, KEY_COUNT, CAP_LOGICAL_KEYS, 0, 7, 2]
         )
         self.assertEqual(self.bridge.lighting.protocol_version, PROTOCOL_VERSION)
+        self.assertEqual(self.bridge.action_protocol_version, PROTOCOL_VERSION)
 
     def test_process_jetski_status_packet(self):
         self.bridge.process_status({
@@ -170,9 +279,38 @@ class ActionTests(unittest.TestCase):
         self.bridge.perform_action(1)
         self.assertEqual(opened, [("codex-session-123", 0, "codex")])
 
+    def test_zero_opens_most_recent_then_one_opens_next(self):
+        self.bridge.sessions.populate_recent(
+            ["most-recent", "next-recent"],
+            providers={"most-recent": "codex", "next-recent": "codex"},
+        )
+        opened = []
+        self.bridge.controller.open_thread = lambda session_id, slot=0, provider="": opened.append(
+            (session_id, slot, provider)
+        )
+        self.bridge.perform_action(10)  # Physical key 0
+        self.bridge.perform_action(1)   # Physical key 1
+        self.assertEqual(
+            opened,
+            [
+                ("most-recent", 9, "codex"),
+                ("next-recent", 0, "codex"),
+            ],
+        )
+
     def test_send_action(self):
         self.bridge.perform_action(17)
         self.assertEqual(self.shortcuts, [(["ENTER"], False)])
+
+    def test_legacy_firmware_uses_six_agent_joystick_action_table(self):
+        self.bridge.action_protocol_version = 1
+        self.bridge.perform_action(7)
+        self.bridge.perform_action(9)
+        self.bridge.perform_action(13)
+        self.bridge.perform_action(15)
+        self.assertEqual(self.scrolls, ["up", "down"])
+        self.assertEqual(self.shortcuts, [(["ENTER"], False)])
+        self.assertEqual(self.new_chats, 1)
 
     def test_top_row_controls(self):
         self.bridge.perform_action(11)  # Approve
@@ -188,7 +326,7 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(self.new_chats, 1)
         self.assertEqual(
             self.microphones,
-            [(["CTRL_OR_CMD", "SHIFT", "D"], ["M"])],
+            [(["CTRL_OR_CMD", "SHIFT", "D"], None)],
         )
 
 
@@ -209,11 +347,95 @@ class ContextDetectionTests(unittest.TestCase):
 
     def test_desktop_context_uses_plain_page_keys(self):
         self.controller._foreground_context = lambda: "Codex"
+        wheel = []
+        self.controller.is_win = True
+        self.controller._scroll_windows_conversation = lambda direction: not wheel.append(direction)
+        self.controller.context_scroll("up")
+        self.controller.context_scroll("down")
+        self.assertEqual(wheel, ["up", "down"])
+        self.assertEqual(self.sent, [])
+
+
+class WindowsPageKeyInjectionTests(unittest.TestCase):
+    class FakeUser32:
+        def __init__(self):
+            self.events = []
+
+        def MapVirtualKeyW(self, code, _map_type):
+            return code
+
+        def keybd_event(self, code, scan, flags, extra_info):
+            self.events.append((code, scan, flags, extra_info))
+
+    def setUp(self):
+        self.controller = Bridge(Path("host/actions.json"), dry_run=True).controller
+        self.user32 = self.FakeUser32()
+        self.controller.is_win = True
+        self.controller.is_mac = False
+        self.controller.is_linux = False
+        self.controller.user32 = self.user32
+
+    def test_desktop_page_keys_are_extended_windows_input(self):
+        self.controller._foreground_context = lambda: "Codex"
+        self.controller._scroll_windows_conversation = lambda direction: False
         self.controller.context_scroll("up")
         self.controller.context_scroll("down")
         self.assertEqual(
-            self.sent,
-            [(["PAGEUP"], False), (["PAGEDOWN"], False)],
+            self.user32.events,
+            [
+                (0x21, 0x21, 0x0001, 0),
+                (0x21, 0x21, 0x0003, 0),
+                (0x22, 0x22, 0x0001, 0),
+                (0x22, 0x22, 0x0003, 0),
+            ],
+        )
+
+    def test_terminal_page_keys_keep_shift_and_extended_page_key(self):
+        self.controller._foreground_context = lambda: "WindowsTerminal.exe"
+        self.controller.context_scroll("up")
+        self.assertEqual(
+            self.user32.events,
+            [
+                (0x10, 0x10, 0, 0),
+                (0x21, 0x21, 0x0001, 0),
+                (0x21, 0x21, 0x0003, 0),
+                (0x10, 0x10, 0x0002, 0),
+            ],
+        )
+
+    def test_desktop_wheel_targets_content_pane_and_restores_cursor(self):
+        class FakeWheelUser32:
+            def __init__(self):
+                self.cursor_positions = []
+                self.wheel_events = []
+
+            def GetForegroundWindow(self):
+                return 123
+
+            def GetWindowRect(self, _hwnd, pointer):
+                bounds = ctypes.cast(pointer, ctypes.POINTER(RECT)).contents
+                bounds.left, bounds.top, bounds.right, bounds.bottom = 0, 0, 1000, 1000
+                return True
+
+            def GetCursorPos(self, pointer):
+                point = ctypes.cast(pointer, ctypes.POINTER(POINT)).contents
+                point.x, point.y = 10, 20
+                return True
+
+            def SetCursorPos(self, x, y):
+                self.cursor_positions.append((x, y))
+                return True
+
+            def mouse_event(self, flags, dx, dy, data, extra_info):
+                self.wheel_events.append((flags, dx, dy, data, extra_info))
+
+        fake = FakeWheelUser32()
+        self.controller.user32 = fake
+        self.assertTrue(self.controller._scroll_windows_conversation("down"))
+        self.assertEqual(fake.cursor_positions, [(700, 450), (10, 20)])
+        self.assertEqual(
+            fake.wheel_events,
+            [(self.controller.MOUSEEVENTF_WHEEL, 0, 0, (-840) & 0xFFFFFFFF, 0)],
         )
 
 

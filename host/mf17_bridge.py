@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -71,6 +74,10 @@ SESSION_FILE_PATTERN = re.compile(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
 STALE_THINKING_TIMEOUT_SECS = 45.0
 AGENT_SLOT_COUNT = 10
+# Firmware status slots follow the physical action order 1..9,0. Recent tasks
+# are assigned by numeric key order 0..9, so rank 0 maps to firmware slot 9.
+NUMERIC_KEY_BY_SLOT = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)
+RECENT_RANK_TO_SLOT = (9, 0, 1, 2, 3, 4, 5, 6, 7, 8)
 PROVIDER_CODEX = "codex"
 PROVIDER_ANTIGRAVITY = "antigravity"
 
@@ -88,6 +95,138 @@ STATUS_IDS = {
     "waiting": 4,
     "error": 5,
 }
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", wintypes.LONG),
+        ("top", wintypes.LONG),
+        ("right", wintypes.LONG),
+        ("bottom", wintypes.LONG),
+    ]
+
+
+def archived_codex_session_ids(
+    state_path: Path | None = None,
+    archive_dir: Path | None = None,
+) -> set[str]:
+    """Return IDs Codex has archived, using both current and legacy storage."""
+    codex_home = Path.home() / ".codex"
+    database = state_path or (codex_home / "state_5.sqlite")
+    archived: set[str] = set()
+    try:
+        uri = f"file:{database.resolve().as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            for (session_id,) in connection.execute(
+                "SELECT id FROM threads WHERE archived != 0"
+            ):
+                value = str(session_id or "")
+                if UUID_PATTERN.fullmatch(value):
+                    archived.add(value)
+    except (OSError, sqlite3.Error):
+        pass
+
+    directory = archive_dir or (codex_home / "archived_sessions")
+    try:
+        for path in directory.glob("*.jsonl"):
+            match = SESSION_FILE_PATTERN.search(path.name)
+            if match:
+                archived.add(match.group(1))
+    except OSError:
+        pass
+    return archived
+
+
+def active_codex_sessions(
+    state_path: Path | None = None,
+    limit: int = AGENT_SLOT_COUNT,
+) -> list[tuple[str, Path]] | None:
+    """Return active root tasks in the same recency order as Codex Desktop."""
+    database = state_path or (Path.home() / ".codex" / "state_5.sqlite")
+    try:
+        uri = f"file:{database.resolve().as_posix()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")
+            }
+            if not {"id", "rollout_path", "archived", "source"}.issubset(columns):
+                return None
+            recency_column = next(
+                (name for name in ("recency_at_ms", "updated_at_ms", "updated_at") if name in columns),
+                None,
+            )
+            order_clause = f" ORDER BY {recency_column} DESC" if recency_column else ""
+            root_clause = (
+                " AND (thread_source IS NULL OR thread_source = 'user')"
+                if "thread_source" in columns
+                else ""
+            )
+            query = (
+                "SELECT id, rollout_path FROM threads "
+                "WHERE archived = 0 AND source = 'vscode'"
+                f"{root_clause}{order_clause} LIMIT ?"
+            )
+            rows = connection.execute(query, (max(0, int(limit)),)).fetchall()
+    except (OSError, sqlite3.Error):
+        return None
+
+    sessions: list[tuple[str, Path]] = []
+    for session_id, rollout_path in rows:
+        value = str(session_id or "")
+        path = Path(str(rollout_path or ""))
+        if UUID_PATTERN.fullmatch(value) and path.is_file():
+            sessions.append((value, path))
+    return sessions
+
+
+def visible_codex_session_ids(
+    index_path: Path | None = None,
+    state_path: Path | None = None,
+    archive_dir: Path | None = None,
+) -> set[str]:
+    """Return task IDs recorded in Codex Desktop's visible session index."""
+    path = index_path or (Path.home() / ".codex" / "session_index.jsonl")
+    visible: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    session_id = str(json.loads(line).get("id") or "")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if UUID_PATTERN.fullmatch(session_id):
+                    visible.add(session_id)
+    except OSError:
+        pass
+    return visible - archived_codex_session_ids(state_path, archive_dir)
+
+
+def root_codex_session_id(path: Path, visible_ids: set[str] | None = None) -> str | None:
+    """Resolve a real desktop task ID and reject reviewers/subagents."""
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            record = json.loads(stream.readline())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload") or {}
+    source = payload.get("source")
+    thread_source = payload.get("thread_source")
+    if not isinstance(source, str) or source.lower() != "vscode":
+        return None
+    if thread_source not in {None, "user"} or payload.get("parent_thread_id"):
+        return None
+    session_id = str(payload.get("id") or payload.get("session_id") or "")
+    if not UUID_PATTERN.fullmatch(session_id):
+        return None
+    if visible_ids and session_id not in visible_ids:
+        return None
+    return session_id
 
 
 def normalize_provider(value: Any, default: str = PROVIDER_ANTIGRAVITY) -> str:
@@ -127,6 +266,29 @@ ACTION_NAMES = {
     17: "send",
 }
 
+# Protocol v1 firmware uses the original six-agent/joystick keymap.  Keep this
+# table separate so a restored keypad cannot be interpreted as the newer
+# ten-agent layout by the current cross-compatible bridge.
+LEGACY_ACTION_NAMES = {
+    1: "agent_1",
+    2: "agent_2",
+    3: "agent_3",
+    4: "agent_4",
+    5: "agent_5",
+    6: "agent_6",
+    7: "up",
+    8: "legacy_right",
+    9: "down",
+    10: "legacy_left",
+    11: "legacy_center",
+    12: "legacy_fast",
+    13: "approve",
+    14: "reject",
+    15: "new_chat",
+    16: "dictation",
+    17: "send",
+}
+
 
 def latest_transcript_state(path: Path) -> str | None:
     """Return a terminal fallback state from the newest turn marker in a transcript."""
@@ -143,6 +305,7 @@ def latest_transcript_state(path: Path) -> str | None:
     except OSError:
         return None
 
+    completed_codex_calls: set[str] = set()
     for raw_line in reversed(lines):
         try:
             record = json.loads(raw_line)
@@ -151,6 +314,33 @@ def latest_transcript_state(path: Path) -> str | None:
 
         step_type = record.get("type", "")
         status = record.get("status", "")
+
+        # Codex app transcripts record a pending request_user_input as a
+        # response_item/function_call. It does not necessarily dispatch a
+        # PermissionRequest hook, so detect the unresolved call directly.
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        payload_type = str(payload.get("type", "")).lower()
+        if payload_type in {"function_call_output", "tool_result", "tool_output"}:
+            call_id = str(payload.get("call_id") or payload.get("callId") or payload.get("id") or "")
+            if call_id:
+                completed_codex_calls.add(call_id)
+        elif payload_type in {"function_call", "tool_call", "server_request"}:
+            tool_name = str(
+                payload.get("name")
+                or payload.get("tool_name")
+                or payload.get("toolName")
+                or payload.get("method")
+                or ""
+            ).lower()
+            if any(marker in tool_name for marker in ("request_user_input", "requestuserinput", "elicitation")):
+                call_id = str(payload.get("call_id") or payload.get("callId") or payload.get("id") or "")
+                if not call_id or call_id not in completed_codex_calls:
+                    return "waiting"
+        elif payload_type in {"request_user_input", "elicitation_request", "mcp_elicitation_request"}:
+            return "waiting"
+
+        if str(step_type).lower() in {"request_user_input", "elicitation_request", "mcp_elicitation_request"}:
+            return "waiting"
 
         if step_type == "USER_INPUT":
             return None
@@ -245,6 +435,14 @@ class SessionSlots:
             return None
 
         current_status = self.slots[existing]["status"]
+        # A pending Codex request_user_input is visible in the transcript even
+        # when the CLI/Desktop hook surface does not emit PermissionRequest.
+        # Promote it immediately so the amber LED is not delayed by the stale
+        # thinking timeout. Other transcript fallbacks remain conservative.
+        if status == "waiting" and current_status in {"idle", "thinking"}:
+            self.slots[existing]["status"] = status
+            self.slots[existing]["updated"] = time.time()
+            return existing
         if current_status != "thinking":
             return None
 
@@ -258,28 +456,36 @@ class SessionSlots:
         return existing
 
     def populate_recent(self, session_ids: list[str], providers: dict[str, str] | None = None) -> bool:
-        """Fill unused slots from recent task files without disturbing live status."""
-        changed = False
-        known = {item["session_id"] for item in self.slots if item}
-        for session_id in session_ids:
-            if session_id in known:
-                continue
-            empty = next((index for index, item in enumerate(self.slots) if item is None), None)
-            if empty is None:
-                break
-            self.slots[empty] = {
-                "session_id": session_id,
-                "status": "idle",
-                "updated": time.time(),
-                "last_hook_time": 0,
-                "provider": normalize_provider((providers or {}).get(session_id)),
-            }
-            known.add(session_id)
-            changed = True
-        if self.active_session is None:
-            first = next((item for item in self.slots if item), None)
-            if first:
-                self.active_session = first["session_id"]
+        """Map recency ranks to numeric keys 0..9 and remove stale tasks."""
+        previous_by_id = {
+            item["session_id"]: item for item in self.slots if item
+        }
+        new_slots: list[dict[str, Any] | None] = [None] * AGENT_SLOT_COUNT
+        for rank, session_id in enumerate(session_ids[:AGENT_SLOT_COUNT]):
+            slot = RECENT_RANK_TO_SLOT[rank]
+            previous = previous_by_id.get(session_id)
+            if previous:
+                item = dict(previous)
+                item["provider"] = normalize_provider(
+                    (providers or {}).get(session_id, item.get("provider"))
+                )
+            else:
+                item = {
+                    "session_id": session_id,
+                    "status": "idle",
+                    "updated": time.time(),
+                    "last_hook_time": 0,
+                    "provider": normalize_provider((providers or {}).get(session_id)),
+                }
+            new_slots[slot] = item
+
+        changed = [item["session_id"] if item else None for item in self.slots] != [
+            item["session_id"] if item else None for item in new_slots
+        ]
+        self.slots = new_slots
+        desired_ids = set(session_ids[:AGENT_SLOT_COUNT])
+        if self.active_session not in desired_ids:
+            self.active_session = session_ids[0] if session_ids else None
         return changed
 
 
@@ -355,6 +561,27 @@ class OSController:
         "[": 0xDB,
         "]": 0xDD,
     }
+    # Navigation keys use the E0 scan-code prefix.  Without the extended-key
+    # flag Windows desktop clients can receive these as incomplete legacy
+    # input, which is why Page Up/Down appeared to work in some terminals but
+    # not reliably in Codex or Antigravity's desktop views.
+    WIN_EXTENDED_VK = frozenset({
+        0x21,  # VK_PRIOR / Page Up
+        0x22,  # VK_NEXT / Page Down
+        0x23,  # VK_END
+        0x24,  # VK_HOME
+        0x25,  # VK_LEFT
+        0x26,  # VK_UP
+        0x27,  # VK_RIGHT
+        0x28,  # VK_DOWN
+        0x2D,  # VK_INSERT
+        0x2E,  # VK_DELETE
+    })
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    KEYEVENTF_KEYUP = 0x0002
+    MOUSEEVENTF_WHEEL = 0x0800
+    WHEEL_DELTA = 120
+    DESKTOP_SCROLL_NOTCHES = 7
 
     def __init__(self, sessions: SessionSlots) -> None:
         self.sessions = sessions
@@ -370,7 +597,6 @@ class OSController:
             self.kernel32 = None
 
     def _init_windows(self) -> None:
-        from ctypes import wintypes
         ULONG_PTR = ctypes.c_uint64 if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
         self.user32 = ctypes.windll.user32
         self.shell32 = ctypes.windll.shell32
@@ -392,6 +618,20 @@ class OSController:
         self.user32.GetClassNameW.restype = ctypes.c_int
         self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         self.user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        self.user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
+        self.user32.GetWindowRect.restype = wintypes.BOOL
+        self.user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+        self.user32.GetCursorPos.restype = wintypes.BOOL
+        self.user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user32.SetCursorPos.restype = wintypes.BOOL
+        self.user32.mouse_event.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ULONG_PTR,
+        ]
+        self.user32.mouse_event.restype = None
         self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         self.kernel32.OpenProcess.restype = wintypes.HANDLE
         self.kernel32.QueryFullProcessImageNameW.argtypes = [
@@ -491,10 +731,40 @@ class OSController:
         return any(marker in context for marker in self.CODEX_MARKERS)
 
     def context_scroll(self, direction: str) -> None:
-        """Page desktop apps, or scroll a terminal viewport when it is focused."""
+        """Scroll the desktop conversation pane or a focused terminal viewport."""
         page_key = "PAGEUP" if direction.lower() in {"up", "pageup", "pgup"} else "PAGEDOWN"
-        keys = ["SHIFT", page_key] if self.is_terminal_context() else [page_key]
-        self.shortcut(keys, focus=False)
+        if self.is_terminal_context():
+            self.shortcut(["SHIFT", page_key], focus=False)
+            return
+        if self.is_win and self._scroll_windows_conversation(direction):
+            return
+        self.shortcut([page_key], focus=False)
+
+    def _scroll_windows_conversation(self, direction: str) -> bool:
+        """Send a page-sized wheel event over the foreground app's content pane."""
+        if not self.user32:
+            return False
+        try:
+            hwnd = self.user32.GetForegroundWindow()
+            bounds = RECT()
+            original = POINT()
+            if not hwnd or not self.user32.GetWindowRect(hwnd, ctypes.byref(bounds)):
+                return False
+            if not self.user32.GetCursorPos(ctypes.byref(original)):
+                return False
+            width = max(1, bounds.right - bounds.left)
+            height = max(1, bounds.bottom - bounds.top)
+            target_x = bounds.left + int(width * 0.70)
+            target_y = bounds.top + int(height * 0.45)
+            delta = self.WHEEL_DELTA * self.DESKTOP_SCROLL_NOTCHES
+            if direction.lower() not in {"up", "pageup", "pgup"}:
+                delta = -delta
+            self.user32.SetCursorPos(target_x, target_y)
+            self.user32.mouse_event(self.MOUSEEVENTF_WHEEL, 0, 0, delta & 0xFFFFFFFF, 0)
+            self.user32.SetCursorPos(original.x, original.y)
+            return True
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
 
     def new_chat(self) -> None:
         """Use Codex's stable command-palette command, with legacy fallback."""
@@ -504,11 +774,11 @@ class OSController:
             self.shortcut(["CTRL_OR_CMD", "SHIFT", "L"], focus=False)
 
     def microphone(self, keys: list[str] | None = None, terminal_keys: list[str] | None = None) -> None:
-        """Toggle dictation using the desktop shortcut or terminal `m` command."""
-        if self.is_terminal_context():
-            self.shortcut(terminal_keys or ["M"], focus=False)
-            return
-        configured = os.environ.get("MF17_MICROPHONE_KEYS", "").strip()
+        """Invoke the Voice shortcut configured in the desktop app's Settings."""
+        configured = (
+            os.environ.get("MF17_VOICE_KEYS", "").strip()
+            or os.environ.get("MF17_MICROPHONE_KEYS", "").strip()
+        )
         desktop_keys = [item.strip() for item in configured.split(",") if item.strip()] if configured else None
         self.shortcut(desktop_keys or keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
 
@@ -595,11 +865,15 @@ class OSController:
             for code in codes:
                 if self.user32:
                     scan = self.user32.MapVirtualKeyW(code, 0)
-                    self.user32.keybd_event(code, scan, 0, 0)
+                    flags = self.KEYEVENTF_EXTENDEDKEY if code in self.WIN_EXTENDED_VK else 0
+                    self.user32.keybd_event(code, scan, flags, 0)
             for code in reversed(codes):
                 if self.user32:
                     scan = self.user32.MapVirtualKeyW(code, 0)
-                    self.user32.keybd_event(code, scan, 0x0002, 0)
+                    flags = self.KEYEVENTF_KEYUP
+                    if code in self.WIN_EXTENDED_VK:
+                        flags |= self.KEYEVENTF_EXTENDEDKEY
+                    self.user32.keybd_event(code, scan, flags, 0)
 
         elif self.is_linux:
             xdo_keys = []
@@ -702,6 +976,7 @@ class Bridge:
         self.lighting = LightingReportEncoder()
         self.lighting_capabilities = 0
         self.lighting_key_count = KEY_COUNT
+        self.action_protocol_version = PROTOCOL_VERSION
 
     def log(self, message: str) -> None:
         if self.dry_run:
@@ -736,7 +1011,18 @@ class Bridge:
             except OSError:
                 pass
 
+        active_codex = active_codex_sessions(limit=AGENT_SLOT_COUNT - len(results))
+        if active_codex is not None:
+            for session_id, path in active_codex:
+                if session_id not in found_ids:
+                    results.append((session_id, path, PROVIDER_CODEX))
+                    found_ids.add(session_id)
+                if len(results) >= AGENT_SLOT_COUNT:
+                    break
+            return results
+
         codex_sessions = Path.home() / ".codex" / "sessions"
+        visible_codex_ids = visible_codex_session_ids()
         if codex_sessions.exists() and codex_sessions.is_dir():
             try:
                 candidates = sorted(
@@ -745,12 +1031,10 @@ class Bridge:
                     reverse=True,
                 )
                 for path in candidates:
-                    match = SESSION_FILE_PATTERN.search(path.name)
-                    if match:
-                        session_id = match.group(1)
-                        if session_id not in found_ids:
-                            results.append((session_id, path, PROVIDER_CODEX))
-                            found_ids.add(session_id)
+                    session_id = root_codex_session_id(path, visible_codex_ids)
+                    if session_id and session_id not in found_ids:
+                        results.append((session_id, path, PROVIDER_CODEX))
+                        found_ids.add(session_id)
                     if len(results) >= AGENT_SLOT_COUNT:
                         break
             except OSError:
@@ -762,16 +1046,19 @@ class Bridge:
         recent = self.find_recent_sessions()
         session_ids: list[str] = []
         providers: dict[str, str] = {}
+        session_files: dict[str, Path] = {}
         for session_id, path, provider in recent:
             session_ids.append(session_id)
-            self.session_files[session_id] = path
-            self.session_providers[session_id] = provider
+            session_files[session_id] = path
             providers[session_id] = provider
+        self.session_files = session_files
+        self.session_providers = providers
 
         if self.sessions.populate_recent(session_ids, providers=providers):
             self.sync_leds()
-            self.log("loaded recent task slots: " + ", ".join(
-                item["session_id"] for item in self.sessions.slots if item
+            self.log("loaded numeric task slots: " + ", ".join(
+                f"{NUMERIC_KEY_BY_SLOT[slot]}={item['session_id']}"
+                for slot, item in enumerate(self.sessions.slots) if item
             ))
 
         for session_id, path in self.session_files.items():
@@ -781,7 +1068,10 @@ class Bridge:
             slot = self.sessions.reconcile_terminal(session_id, state)
             if slot is not None:
                 self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
-                self.log(f"reconciled session={session_id} state={state} slot={slot + 1}")
+                self.log(
+                    f"reconciled session={session_id} state={state} "
+                    f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+                )
 
     def connect(self) -> bool:
         if self.dry_run:
@@ -805,6 +1095,7 @@ class Bridge:
         device.set_nonblocking(True)
         self.device = device
         self.lighting.protocol_version = 1
+        self.action_protocol_version = 1
         self.lighting_capabilities = 0
         self.sync_leds()
         self.send_report([MSG_GET_CAPABILITIES, 0])
@@ -844,7 +1135,10 @@ class Bridge:
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
-            self.log(f"status provider={provider} session={session_id} state={status} slot={slot + 1}")
+            self.log(
+                f"status provider={provider} session={session_id} state={status} "
+                f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+            )
 
     def process_lighting(self, payload: dict[str, Any]) -> None:
         try:
@@ -865,12 +1159,15 @@ class Bridge:
             version = int(report[2])
             key_count = int(report[3])
             capabilities = int(report[4]) | (int(report[5]) << 8)
+            action_layout = int(report[7]) if len(report) > 7 else 0
             if version >= PROTOCOL_VERSION and key_count == KEY_COUNT and capabilities & CAP_LOGICAL_KEYS:
                 self.lighting.protocol_version = version
+                self.action_protocol_version = 1 if action_layout == 1 else version
                 self.lighting_key_count = key_count
                 self.lighting_capabilities = capabilities
                 self.log(
-                    f"lighting API v{version} keys={key_count} capabilities=0x{capabilities:04x}"
+                    f"lighting API v{version} keys={key_count} capabilities=0x{capabilities:04x} "
+                    f"action_layout={action_layout or 'protocol-default'}"
                 )
         elif report[0] == MSG_ACK and len(report) >= 4:
             request_id, command, status = report[1:4]
@@ -878,10 +1175,17 @@ class Bridge:
             self.log(f"lighting ack request={request_id} command=0x{command:02x} {level}")
         elif report[0] == MSG_PONG:
             version = report[1] if len(report) > 1 else "unknown"
-            self.log(f"received MF17 pong protocol={version}")
+            action_layout = int(report[2]) if len(report) > 2 else 0
+            if isinstance(version, int) and version >= 1:
+                self.action_protocol_version = 1 if action_layout == 1 else version
+            self.log(
+                f"received MF17 pong protocol={version} "
+                f"action_layout={action_layout or 'protocol-default'}"
+            )
 
     def perform_action(self, action_id: int) -> None:
-        name = ACTION_NAMES.get(action_id)
+        action_names = LEGACY_ACTION_NAMES if self.action_protocol_version == 1 else ACTION_NAMES
+        name = action_names.get(action_id)
         action = self.actions.get(name) if name else None
         if not action:
             print(f"Unmapped action {action_id}", file=sys.stderr)
@@ -897,9 +1201,12 @@ class Bridge:
             self.send_report([MSG_SET_SELECTED, slot])
             self.controller.open_thread(session_id, slot=slot, provider=provider)
             if session_id:
-                self.log(f"selected task slot={slot + 1} provider={provider} session={session_id}")
+                self.log(
+                    f"selected task key={NUMERIC_KEY_BY_SLOT[slot]} "
+                    f"provider={provider} session={session_id}"
+                )
             else:
-                self.log(f"task slot={slot + 1} is empty")
+                self.log(f"task key={NUMERIC_KEY_BY_SLOT[slot]} is empty")
         elif kind == "shortcut":
             self.controller.shortcut(list(action["keys"]), focus=bool(action.get("focus", False)))
         elif kind == "context_scroll":

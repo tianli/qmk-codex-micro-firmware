@@ -104,6 +104,9 @@ class FirmwareLayoutTests(unittest.TestCase):
         ):
             self.assertIn(command, source)
         self.assertRegex(source, r"#define\s+LIGHTING_PROTOCOL_VERSION\s+2")
+        self.assertRegex(source, r"#define\s+ACTION_LAYOUT_TEN_AGENT\s+2")
+        self.assertIn("packet[7] = ACTION_LAYOUT_TEN_AGENT;", source)
+        self.assertIn("packet[2] = ACTION_LAYOUT_TEN_AGENT;", source)
         self.assertIn("send_ack(data[1], data[0], ACK_OK);", source)
         self.assertGreater(source.rindex("host_key_mask &"), source.index("status_color(agent_statuses[slot])"))
 

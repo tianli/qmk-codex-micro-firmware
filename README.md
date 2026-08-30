@@ -27,13 +27,13 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 
 ### Controls
 
-- **Agent 1 – 9, Agent 0** (Keys `1` through `9`, and Key `0`): Selects and focuses that conversation in Codex or Antigravity. The physical LED under each numeric key reflects that task's live status.
+- **Agent 0 – 9** (Keys `0` through `9`): Key `0` selects the most recent active conversation, Key `1` selects the next most recent, continuing in order through Key `9`. Codex slots follow the desktop app's active-task recency and exclude archived, voice-only, guardian, reviewer, and subagent threads. The physical LED under each numeric key reflects that task's live status.
 - **Top Row Left (Top 1)**: **Approve** (`Enter`) to confirm tool permissions or choices.
 - **Top Row Mid-Left (Top 2)**: **Reject** (`Escape`) to decline tool execution or dismiss prompts.
 - **Top Row Mid-Right (Top 3)**: Context-aware Page Up. The bridge detects a terminal foreground window and sends `Shift+Page Up`; in the Codex desktop thread it sends plain `Page Up`.
 - **Top Row Right (Top 4)**: Context-aware Page Down, using the matching terminal (`Shift+Page Down`) or desktop (`Page Down`) behavior.
 - **New Chat** (`+` key): In Codex, opens the command palette's stable **New chat** command; other supported hosts retain the legacy `Cmd/Ctrl+Shift+L` fallback.
-- **Dictate / Mic** (`.` key): Sends the configured desktop dictation shortcut, or `m` when a terminal/TUI is focused. Set `MF17_MICROPHONE_KEYS` to a comma-separated shortcut (for example `CTRL_OR_CMD,SHIFT,D`) if you changed Codex's shortcut in Settings. Set `MF17_SCROLL_CONTEXT=terminal` or `desktop` to override detection when an embedded terminal does not expose a distinct window title.
+- **Voice / Mic** (`.` key): Sends the Voice shortcut configured in Codex/ChatGPT Desktop Settings, even when a terminal has focus. The app has no documented default Voice shortcut; configure `Ctrl+Shift+D` in the app, or set `MF17_VOICE_KEYS` to the comma-separated shortcut you chose. Set `MF17_SCROLL_CONTEXT=terminal` or `desktop` to override terminal detection.
 - **Send** (`Enter` key): Submit the current prompt or input (`Enter`).
 
 ### Agent Status LED Colors
@@ -88,6 +88,14 @@ opened with `codex://threads/<id>`; Antigravity task IDs use
 
 ```bash
 ./scripts/run-bridge.sh
+```
+
+On Windows, if you launch the bridge from a Codex command runner, use the
+interactive-desktop launcher so its key events reach the visible Codex or
+Antigravity window:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run-bridge-interactive.py
 ```
 
 To run automatically in the background at system boot:

@@ -66,6 +66,7 @@ enum agent_status {
 
 #define AGENT_COUNT 10
 #define LIGHTING_PROTOCOL_VERSION 2
+#define ACTION_LAYOUT_TEN_AGENT 2
 #define LIGHTING_KEY_COUNT 17
 #define LIGHTING_MAX_BATCH_KEYS 7
 #define CAP_LOGICAL_KEYS (1U << 0)
@@ -174,7 +175,7 @@ static uint8_t lighting_led_for_key(uint8_t key_id) {
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     /*
      * Layout:
-     * Row 0: Approve, Reject, Up, Down
+     * Row 0: Num Lock=Approve, /=Reject/Stop, *=Up, -=Down
      * Row 1: 7, 8, 9, (empty)
      * Row 2: 4, 5, 6, New Chat (+)
      * Row 3: 1, 2, 3, (empty)
@@ -289,6 +290,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             packet[4] = (uint8_t)(LIGHTING_CAPABILITIES & 0xFF);
             packet[5] = (uint8_t)(LIGHTING_CAPABILITIES >> 8);
             packet[6] = LIGHTING_MAX_BATCH_KEYS;
+            packet[7] = ACTION_LAYOUT_TEN_AGENT;
             send_packet(packet);
             break;
         }
@@ -383,6 +385,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             uint8_t packet[RAW_EPSIZE] = {0};
             packet[0] = MSG_PONG;
             packet[1] = LIGHTING_PROTOCOL_VERSION;
+            packet[2] = ACTION_LAYOUT_TEN_AGENT;
             send_packet(packet);
             break;
         }
