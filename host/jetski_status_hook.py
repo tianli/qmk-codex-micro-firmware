@@ -200,6 +200,35 @@ def _contains_error(value: Any) -> bool:
     return False
 
 
+def _get_last_assistant_message(event: dict[str, Any]) -> str:
+    """Extract the assistant's final response from payload or transcript."""
+    for key in ("last_assistant_message", "lastAssistantMessage", "message", "content"):
+        val = event.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    tpath = event.get("transcriptPath") or event.get("transcript_path")
+    if tpath:
+        try:
+            p = Path(tpath)
+            if p.exists():
+                with open(p, "rb") as f:
+                    size = f.seek(0, 2)
+                    f.seek(max(0, size - 32768))
+                    lines = f.readlines()
+                for line in reversed(lines):
+                    try:
+                        rec = json.loads(line)
+                        content = rec.get("content") or rec.get("text")
+                        if isinstance(content, str) and content.strip():
+                            return content.strip()
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    return ""
+
+
 def event_to_status(event: dict[str, Any], explicit_event: str | None = None) -> tuple[str, bool]:
     """Map hook event payload to (status, remove_slot).
     
@@ -212,7 +241,7 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"sessionend", "session_end"}:
         return "off", True
 
-    # Stop -> complete (or error if error occurred)
+    # Stop -> waiting (Amber) if awaiting user input / question, or complete (Green)
     if name in {"stop", "subagentstop", "subagent_stop"}:
         if has_error:
             return "error", False
@@ -221,8 +250,11 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
             return "error", False
         if _contains_waiting_signal(event) or any(marker in reason for marker in WAITING_REASON_MARKERS):
             return "waiting", False
-        if _looks_like_user_prompt(event.get("last_assistant_message")):
+        
+        last_msg = _get_last_assistant_message(event)
+        if _looks_like_user_prompt(last_msg):
             return "waiting", False
+
         return "complete", False
 
     # PermissionRequest
