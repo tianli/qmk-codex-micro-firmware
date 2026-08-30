@@ -458,7 +458,7 @@ class SessionSlots:
         return normalize_provider(item.get("provider") if item else None)
 
     def reconcile_terminal(self, session_id: str, status: str) -> int | None:
-        """Resolve a stale thinking state ONLY after STALE_THINKING_TIMEOUT_SECS without hook updates."""
+        """Resolve a stale thinking state ONLY when an active session was thinking."""
         existing = next(
             (index for index, item in enumerate(self.slots) if item and item["session_id"] == session_id),
             None,
@@ -467,18 +467,16 @@ class SessionSlots:
             return None
 
         current_status = self.slots[existing]["status"]
-        # A pending Codex request_user_input is visible in the transcript even
-        # when the CLI/Desktop hook surface does not emit PermissionRequest.
-        # Promote it immediately so the amber LED is not delayed by the stale
-        # thinking timeout. Other transcript fallbacks remain conservative.
-        if status == "waiting" and current_status in {"idle", "thinking"}:
-            self.slots[existing]["status"] = status
-            self.slots[existing]["updated"] = time.time()
-            return existing
         if current_status != "thinking":
             return None
 
         now = time.time()
+        # Promote thinking to waiting immediately if a prompt/question was detected
+        if status == "waiting":
+            self.slots[existing]["status"] = status
+            self.slots[existing]["updated"] = now
+            return existing
+
         last_hook = self.slots[existing].get("last_hook_time", 0)
         if (now - last_hook) < STALE_THINKING_TIMEOUT_SECS:
             return None
