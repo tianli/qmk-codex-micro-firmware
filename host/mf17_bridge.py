@@ -962,7 +962,7 @@ class OSController:
 
 
 class Bridge:
-    def __init__(self, actions_path: Path, dry_run: bool = False) -> None:
+    def __init__(self, actions_path: Path, dry_run: bool = False, provider: str | None = None) -> None:
         self.actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.sessions = SessionSlots()
         self.controller = OSController(self.sessions)
@@ -972,7 +972,8 @@ class Bridge:
         self.last_session_scan = 0.0
         self.session_files: dict[str, Path] = {}
         self.session_providers: dict[str, str] = {}
-        self.default_provider = normalize_provider(os.environ.get("MF17_PROVIDER"))
+        raw_prov = provider if provider and provider != "auto" else os.environ.get("MF17_PROVIDER")
+        self.default_provider = normalize_provider(raw_prov) if raw_prov else None
         self.lighting = LightingReportEncoder()
         self.lighting_capabilities = 0
         self.lighting_key_count = KEY_COUNT
@@ -1289,13 +1290,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="MF17 Codex/Antigravity Keypad Bridge")
     parser.add_argument("--dry-run", action="store_true", help="run without opening HID")
     parser.add_argument(
+        "--provider",
+        type=str,
+        default="auto",
+        choices=["auto", "jetski", "antigravity", "codex"],
+        help="active application provider (jetski, codex, or auto)",
+    )
+    parser.add_argument(
         "--actions",
         type=Path,
         default=Path(__file__).with_name("actions.json"),
     )
     args = parser.parse_args()
     while True:
-        bridge = Bridge(args.actions, dry_run=args.dry_run)
+        bridge = Bridge(args.actions, dry_run=args.dry_run, provider=args.provider)
         try:
             bridge.run()
         except KeyboardInterrupt:
