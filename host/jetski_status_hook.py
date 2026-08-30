@@ -159,18 +159,15 @@ def _looks_like_user_prompt(message: Any) -> bool:
     if not text:
         return False
 
-    # A final question mark is the strongest signal. Allow common closing
-    # quotes/brackets and markdown punctuation after it.
-    if re.search(r"\?\s*[\"'`\)\]]*\s*$", text):
+    tail = text[-800:]
+
+    # Check if there is any question mark in the final block of the message
+    if "?" in tail:
         return True
 
-    # Some prompts are phrased as imperatives without a question mark. Only
-    # inspect the final sentence to avoid matching quoted/code content or a
-    # harmless “when/what” in the middle of a completed explanation.
-    tail = text[-600:]
-    final_sentence = re.split(r"(?<=[.!?])\s+", tail)[-1]
+    # Check for prompt/instruction phrases in the final block
     return any(
-        re.search(pattern, final_sentence, flags=re.IGNORECASE)
+        re.search(pattern, tail, flags=re.IGNORECASE)
         for pattern in USER_PROMPT_PATTERNS
     )
 

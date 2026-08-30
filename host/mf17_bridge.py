@@ -290,6 +290,33 @@ LEGACY_ACTION_NAMES = {
 }
 
 
+USER_PROMPT_PATTERNS = (
+    r"\b(?:should\s+i|would\s+you\s+like|do\s+you\s+want|shall\s+i)\b",
+    r"\b(?:which\s+(?:one|option|approach|path|file|directory)\s+would\s+you)\b",
+    r"\b(?:please\s+(?:let\s+me\s+know|confirm|choose|specify|clarify|reply|provide|select))\b",
+    r"\b(?:let\s+me\s+know\s+(?:which|what|if\s+you\s+would\s+like|how\s+you\s+would\s+like))\b",
+    r"\b(?:i\s+need|waiting\s+for|waiting\s+on)\b.{0,60}\b(?:input|answer|choice|selection|details|response)\b",
+)
+
+
+def _looks_like_user_prompt(message: Any) -> bool:
+    """Return true for a final assistant message that asks the user to respond."""
+    if not isinstance(message, str):
+        return False
+    text = " ".join(message.strip().split())
+    if not text:
+        return False
+
+    tail = text[-800:]
+    if "?" in tail:
+        return True
+
+    return any(
+        re.search(pattern, tail, flags=re.IGNORECASE)
+        for pattern in USER_PROMPT_PATTERNS
+    )
+
+
 def latest_transcript_state(path: Path) -> str | None:
     """Return a terminal fallback state from the newest turn marker in a transcript."""
     try:
@@ -353,6 +380,11 @@ def latest_transcript_state(path: Path) -> str | None:
                     return "waiting"
             if status == "ERROR" or record.get("error"):
                 return "error"
+            
+            content = str(record.get("content") or "")
+            if _looks_like_user_prompt(content):
+                return "waiting"
+
             if status == "DONE" and not tool_calls:
                 return "complete"
             if status == "DONE" and tool_calls:
