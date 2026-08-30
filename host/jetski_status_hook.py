@@ -255,6 +255,10 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         if _looks_like_user_prompt(last_msg):
             return "waiting", False
 
+        # When the agent finishes responding and awaits user's input/decision:
+        if reason in {"model_stop", "stop", "user_turn"} or event.get("fullyIdle") is True:
+            return "waiting", False
+
         return "complete", False
 
     # PermissionRequest
@@ -275,7 +279,8 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"posttooluse", "post_tool_use"}:
         if has_error:
             return "error", False
-        if _contains_waiting_signal(event.get("tool_response")):
+        tool_name = _tool_name(event)
+        if _is_interactive_tool(tool_name) or _contains_waiting_signal(event.get("tool_response")):
             return "waiting", False
         return "thinking", False
 
@@ -284,6 +289,11 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         return "thinking", False
 
     if name in {"postinvocation", "post_invocation"}:
+        if has_error:
+            return "error", False
+        last_msg = _get_last_assistant_message(event)
+        if _looks_like_user_prompt(last_msg):
+            return "waiting", False
         return "thinking", False
 
     # Fallback inspection if event name wasn't explicitly supplied
