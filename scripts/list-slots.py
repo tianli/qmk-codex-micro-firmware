@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -27,38 +29,51 @@ LOG_PATH = Path(__file__).resolve().parent.parent / "host" / "mf17_bridge.log"
 
 
 def get_conversation_workspace(session_id: str) -> str:
-    try:
-        res = subprocess.run(
-            ["agentapi", "get-conversation-metadata", session_id],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if res.returncode == 0:
-            json_start = res.stdout.find("{")
-            if json_start != -1:
-                data = json.loads(res.stdout[json_start:])
-                meta = data.get("response", {}).get("conversationMetadata", {}).get("metadata", {})
-                workspaces = meta.get("workspaces", [])
-                if workspaces and "workspaceFolderAbsoluteUri" in workspaces[0]:
-                    return workspaces[0]["workspaceFolderAbsoluteUri"].replace("file://", "")
-                uris = meta.get("workspaceUris", [])
-                if uris:
-                    return uris[0].replace("file://", "")
-    except Exception:
-        pass
+    app_data_dir = os.environ.get("JETSKI_APP_DATA_DIR")
+    jetski_brain = None
+    if app_data_dir:
+        candidate = Path(app_data_dir).expanduser()
+        if (candidate / "brain").exists():
+            jetski_brain = candidate / "brain"
+        elif candidate.name == "brain" and candidate.exists():
+            jetski_brain = candidate
+    if not jetski_brain or not jetski_brain.exists():
+        jetski_brain = Path.home() / ".gemini" / "jetski" / "brain"
 
-    transcript = Path.home() / ".gemini" / "jetski" / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+    transcript = jetski_brain / session_id / ".system_generated" / "logs" / "transcript.jsonl"
     if transcript.exists():
         try:
             with open(transcript, "r", encoding="utf-8") as f:
                 first_line = json.loads(f.readline())
                 content = str(first_line.get("content", "")).strip().split("\n")[0]
-                return f"Prompt: {content[:40]}..."
+                if content:
+                    return f"Prompt: {content[:42]}..."
         except Exception:
             pass
 
-    return "(no active workspace recorded)"
+    if shutil.which("agentapi"):
+        try:
+            res = subprocess.run(
+                ["agentapi", "get-conversation-metadata", session_id],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+            if res.returncode == 0:
+                json_start = res.stdout.find("{")
+                if json_start != -1:
+                    data = json.loads(res.stdout[json_start:])
+                    meta = data.get("response", {}).get("conversationMetadata", {}).get("metadata", {})
+                    workspaces = meta.get("workspaces", [])
+                    if workspaces and "workspaceFolderAbsoluteUri" in workspaces[0]:
+                        return workspaces[0]["workspaceFolderAbsoluteUri"].replace("file://", "")
+                    uris = meta.get("workspaceUris", [])
+                    if uris:
+                        return uris[0].replace("file://", "")
+        except Exception:
+            pass
+
+    return "(active task)"
 
 
 def main() -> int:
@@ -96,8 +111,8 @@ def main() -> int:
         print("No task slots have been assigned yet.")
         return 0
 
-    print(f"\n{'Key / Recency':<24} | {'Status':<10} | {'Workspace / Info':<45} | {'Conversation ID'}")
-    print("-" * 118)
+    print(f"\n{'Key / Recency':<24} | {'Status':<10} | {'Workspace / Info':<48} | {'Conversation ID'}")
+    print("-" * 120)
 
     for digit in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
         key_label = DIGIT_LABELS.get(digit, f"Key {digit}")
@@ -105,9 +120,9 @@ def main() -> int:
         if sid:
             status = status_map.get(sid, "idle")
             workspace = get_conversation_workspace(sid)
-            print(f"{key_label:<24} | {status:<10} | {workspace:<45} | {sid}")
+            print(f"{key_label:<24} | {status:<10} | {workspace:<48} | {sid}")
         else:
-            print(f"{key_label:<24} | {'off':<10} | {'(unassigned)':<45} | -")
+            print(f"{key_label:<24} | {'off':<10} | {'(unassigned)':<48} | -")
 
     print()
     return 0
