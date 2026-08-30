@@ -993,7 +993,15 @@ class Bridge:
         found_ids: set[str] = set()
 
         app_data_dir = os.environ.get("JETSKI_APP_DATA_DIR")
-        jetski_brain = Path(app_data_dir) / "brain" if app_data_dir else Path.home() / ".gemini" / "jetski" / "brain"
+        jetski_brain = None
+        if app_data_dir:
+            candidate = Path(app_data_dir).expanduser()
+            if (candidate / "brain").exists():
+                jetski_brain = candidate / "brain"
+            elif candidate.name == "brain" and candidate.exists():
+                jetski_brain = candidate
+        if not jetski_brain or not jetski_brain.exists():
+            jetski_brain = Path.home() / ".gemini" / "jetski" / "brain"
         
         if jetski_brain.exists() and jetski_brain.is_dir():
             try:

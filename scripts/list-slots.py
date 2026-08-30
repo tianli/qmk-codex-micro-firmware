@@ -9,17 +9,18 @@ import re
 import subprocess
 import sys
 
-SLOT_KEYS = {
-    0: "Agent 1 (Key 1)",
-    1: "Agent 2 (Key 2)",
-    2: "Agent 3 (Key 3)",
-    3: "Agent 4 (Key 4)",
-    4: "Agent 5 (Key 5)",
-    5: "Agent 6 (Key 6)",
-    6: "Agent 7 (Key 7)",
-    7: "Agent 8 (Key 8)",
-    8: "Agent 9 (Key 9)",
-    9: "Agent 0 (Key 0)",
+# Numeric keys in recency order: 0 is newest, 1 is 2nd newest, ..., 9 is 10th
+DIGIT_LABELS = {
+    0: "Key 0 (Most Recent)",
+    1: "Key 1 (Rank 2)",
+    2: "Key 2 (Rank 3)",
+    3: "Key 3 (Rank 4)",
+    4: "Key 4 (Rank 5)",
+    5: "Key 5 (Rank 6)",
+    6: "Key 6 (Rank 7)",
+    7: "Key 7 (Rank 8)",
+    8: "Key 8 (Rank 9)",
+    9: "Key 9 (Rank 10)",
 }
 
 LOG_PATH = Path(__file__).resolve().parent.parent / "host" / "mf17_bridge.log"
@@ -65,37 +66,48 @@ def main() -> int:
         print("No bridge log found at:", LOG_PATH)
         return 1
 
-    recent_line = ""
+    slot_map: dict[int, str] = {}
     status_map: dict[str, str] = {}
 
     with open(LOG_PATH, "r", encoding="utf-8") as f:
         for line in f:
-            if "loaded recent task slots:" in line:
-                recent_line = line
-            match = re.search(r"status session=([0-9a-f-]+) state=(\w+) slot=(\d+)", line)
+            if "loaded numeric task slots:" in line:
+                # Format: 0=id1, 1=id2, ...
+                raw = line.split("loaded numeric task slots:")[-1].strip()
+                pairs = [p.strip() for p in raw.split(",") if "=" in p]
+                for p in pairs:
+                    k, v = p.split("=", 1)
+                    try:
+                        slot_map[int(k.strip())] = v.strip()
+                    except ValueError:
+                        pass
+            elif "loaded recent task slots:" in line:
+                raw_ids = line.split("loaded recent task slots:")[-1].strip()
+                session_ids = [s.strip() for s in raw_ids.split(",") if s.strip()]
+                for idx, sid in enumerate(session_ids[:10]):
+                    slot_map[idx] = sid
+
+            match = re.search(r"status session=([0-9a-f-]+) state=(\w+)", line)
             if match:
-                sid, state, slot_num = match.groups()
+                sid, state = match.groups()
                 status_map[sid] = state
 
-    if not recent_line:
+    if not slot_map:
         print("No task slots have been assigned yet.")
         return 0
 
-    raw_ids = recent_line.split("loaded recent task slots:")[-1].strip()
-    session_ids = [s.strip() for s in raw_ids.split(",") if s.strip()]
+    print(f"\n{'Key / Recency':<24} | {'Status':<10} | {'Workspace / Info':<45} | {'Conversation ID'}")
+    print("-" * 118)
 
-    print(f"\n{'Key / Slot':<22} | {'Status':<10} | {'Workspace / Info':<45} | {'Conversation ID'}")
-    print("-" * 115)
-
-    for slot_idx in range(10):
-        key_label = SLOT_KEYS.get(slot_idx, f"Agent {slot_idx + 1}")
-        if slot_idx < len(session_ids):
-            sid = session_ids[slot_idx]
+    for digit in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+        key_label = DIGIT_LABELS.get(digit, f"Key {digit}")
+        sid = slot_map.get(digit)
+        if sid:
             status = status_map.get(sid, "idle")
             workspace = get_conversation_workspace(sid)
-            print(f"{key_label:<22} | {status:<10} | {workspace:<45} | {sid}")
+            print(f"{key_label:<24} | {status:<10} | {workspace:<45} | {sid}")
         else:
-            print(f"{key_label:<22} | {'off':<10} | {'(unassigned)':<45} | -")
+            print(f"{key_label:<24} | {'off':<10} | {'(unassigned)':<45} | -")
 
     print()
     return 0
