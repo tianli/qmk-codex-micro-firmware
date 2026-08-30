@@ -438,6 +438,23 @@ class WindowsPageKeyInjectionTests(unittest.TestCase):
             [(self.controller.MOUSEEVENTF_WHEEL, 0, 0, (-840) & 0xFFFFFFFF, 0)],
         )
 
+    def test_process_status_message_updates_slots(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True)
+        session_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        payload = {
+            "kind": "jetski_status",
+            "provider": "antigravity",
+            "session_id": session_id,
+            "status": "thinking",
+            "remove": False,
+        }
+        bridge.process_status(payload)
+        self.assertEqual(bridge.sessions.active_session, session_id)
+        slot = next(idx for idx, item in enumerate(bridge.sessions.slots) if item and item["session_id"] == session_id)
+        self.assertEqual(bridge.sessions.slots[slot]["status"], "thinking")
+        self.assertEqual(bridge.sessions.slots[slot]["provider"], "antigravity")
+
 
 if __name__ == "__main__":
     unittest.main()
+

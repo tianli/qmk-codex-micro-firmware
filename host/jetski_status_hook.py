@@ -326,10 +326,23 @@ def main() -> int:
 
     try:
         encoded = json.dumps(message, separators=(",", ":")).encode("utf-8")
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(0.5)
-            sock.sendto(encoded, (HOST, PORT))
-    except OSError:
+        # 1. Fast local UDP broadcast
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.2)
+                sock.sendto(encoded, (HOST, PORT))
+        except OSError:
+            pass
+
+        # 2. TCP socket fallback for SSH RemoteForward tunneling (e.g. Cloudtop)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.25)
+                sock.connect((HOST, PORT))
+                sock.sendall(encoded + b"\n")
+        except OSError:
+            pass
+    except Exception:
         pass
 
     # For Jetski hooks:

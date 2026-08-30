@@ -1233,13 +1233,20 @@ class Bridge:
             self.controller.slash(str(action["command"]), focus=bool(action.get("focus", False)))
 
     def run(self) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((UDP_HOST, UDP_PORT))
-        sock.setblocking(False)
-        self.udp_socket = sock
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_sock.bind((UDP_HOST, UDP_PORT))
+        udp_sock.setblocking(False)
+        self.udp_socket = udp_sock
+
+        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        tcp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        tcp_sock.bind((UDP_HOST, UDP_PORT))
+        tcp_sock.listen(5)
+        tcp_sock.setblocking(False)
+
         last_connect_attempt = 0.0
-        print(f"MF17 Codex/Antigravity bridge listening on udp://{UDP_HOST}:{UDP_PORT} (10 task slots)")
-        self.log("bridge started (10 Agent slots)")
+        print(f"MF17 Codex/Antigravity bridge listening on udp+tcp://{UDP_HOST}:{UDP_PORT} (10 task slots)")
+        self.log("bridge started (10 Agent slots, UDP+TCP)")
         self.refresh_recent_sessions()
 
         while True:
@@ -1257,9 +1264,10 @@ class Bridge:
                     print(f"MF17 connect failed: {exc}", file=sys.stderr)
                     self.log(f"connect failed: {exc!r}")
 
+            # 1. Process UDP status packets (fast local datagrams)
             try:
                 while True:
-                    data, _ = sock.recvfrom(4096)
+                    data, _ = udp_sock.recvfrom(4096)
                     payload = json.loads(data.decode("utf-8"))
                     kind = payload.get("kind")
                     if kind in {"jetski_status", "antigravity_status", "codex_status"}:
@@ -1269,7 +1277,33 @@ class Bridge:
             except BlockingIOError:
                 pass
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                print(f"Ignored malformed packet: {exc}", file=sys.stderr)
+                print(f"Ignored malformed UDP packet: {exc}", file=sys.stderr)
+
+            # 2. Process TCP connections (SSH RemoteForward from Cloudtop or remote hosts)
+            try:
+                while True:
+                    conn, _ = tcp_sock.accept()
+                    with conn:
+                        conn.settimeout(0.5)
+                        data = conn.recv(8192)
+                        if data:
+                            for line in data.decode("utf-8", errors="replace").splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    payload = json.loads(line)
+                                    kind = payload.get("kind")
+                                    if kind in {"jetski_status", "antigravity_status", "codex_status"}:
+                                        self.process_status(payload)
+                                    elif kind == "lighting":
+                                        self.process_lighting(payload)
+                                except json.JSONDecodeError:
+                                    pass
+            except BlockingIOError:
+                pass
+            except OSError:
+                pass
 
             if self.device is not None:
                 try:
