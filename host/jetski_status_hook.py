@@ -54,13 +54,13 @@ WAITING_REASON_MARKERS = (
     "elicitation",
 )
 
-# Codex's normal conversational question is delivered as a Stop hook with
-# ``last_assistant_message`` rather than PermissionRequest. Keep this list
-# deliberately narrow: a question at the end of the assistant's message or an
-# explicit request for a choice/input means the task is waiting for the user.
+# Narrow patterns for detecting when the assistant explicitly asks the user to choose or respond
 USER_PROMPT_PATTERNS = (
-    r"\b(?:please|could you|can you|would you|will you|which|what|where|when|how|do you|should i|shall i|choose|select|confirm|tell me|let me know)\b",
-    r"\b(?:i need|waiting for|waiting on|provide|send me|reply with|respond with)\b.{0,80}\b(?:input|answer|choice|selection|details|response)\b",
+    r"\b(?:should\s+i|would\s+you\s+like|do\s+you\s+want|shall\s+i)\b",
+    r"\b(?:which\s+(?:one|option|approach|path|file|directory)\s+would\s+you)\b",
+    r"\b(?:please\s+(?:let\s+me\s+know|confirm|choose|specify|clarify|reply|provide|select))\b",
+    r"\b(?:let\s+me\s+know\s+(?:which|what|if\s+you\s+would\s+like|how\s+you\s+would\s+like))\b",
+    r"\b(?:i\s+need|waiting\s+for|waiting\s+on)\b.{0,60}\b(?:input|answer|choice|selection|details|response)\b",
 )
 
 
@@ -241,7 +241,7 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"sessionend", "session_end"}:
         return "off", True
 
-    # Stop -> waiting (Amber) if awaiting user input / question, or complete (Green)
+    # Stop -> complete (Green) unless explicit question/prompt was asked (Amber)
     if name in {"stop", "subagentstop", "subagent_stop"}:
         if has_error:
             return "error", False
@@ -253,10 +253,6 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         
         last_msg = _get_last_assistant_message(event)
         if _looks_like_user_prompt(last_msg):
-            return "waiting", False
-
-        # When the agent finishes responding and awaits user's input/decision:
-        if reason in {"model_stop", "stop", "user_turn"} or event.get("fullyIdle") is True:
             return "waiting", False
 
         return "complete", False

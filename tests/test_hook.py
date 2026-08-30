@@ -61,10 +61,10 @@ class HookStatusTests(unittest.TestCase):
             ("error", False),
         )
 
-        # Stop awaiting user input -> waiting (Amber LED)
+        # Stop without error -> complete (Green LED)
         self.assertEqual(
             event_to_status({"terminationReason": "model_stop"}, explicit_event="Stop"),
-            ("waiting", False),
+            ("complete", False),
         )
 
         # Stop with error -> error (Red LED)
