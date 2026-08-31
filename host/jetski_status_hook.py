@@ -397,6 +397,21 @@ def main() -> int:
         if first_wp:
             workspace_name = os.path.basename(first_wp.rstrip("/\\"))
 
+    term_prog = str(os.environ.get("TERM_PROGRAM") or "").lower()
+    terminal_app = None
+    if "iterm" in term_prog or os.environ.get("ITERM_SESSION_ID"):
+        terminal_app = "iTerm"
+    elif "apple_terminal" in term_prog:
+        terminal_app = "Terminal"
+    elif "alacritty" in term_prog:
+        terminal_app = "Alacritty"
+    elif "kitty" in term_prog:
+        terminal_app = "kitty"
+    elif "warp" in term_prog:
+        terminal_app = "Warp"
+    elif "wezterm" in term_prog:
+        terminal_app = "WezTerm"
+
     message = {
         "kind": "jetski_status",
         "provider": "antigravity",
@@ -408,6 +423,7 @@ def main() -> int:
         "pid": ppid,
         "is_remote": is_remote,
         "workspace": workspace_name,
+        "terminal_app": terminal_app,
     }
 
     try:

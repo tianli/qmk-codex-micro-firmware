@@ -431,6 +431,7 @@ class SessionSlots:
         pid: int | None = None,
         is_remote: bool = False,
         workspace: str | None = None,
+        terminal_app: str | None = None,
     ) -> int | None:
         now = time.time()
         existing = next(
@@ -464,6 +465,7 @@ class SessionSlots:
             "pid": pid if pid is not None else previous.get("pid") if previous else None,
             "is_remote": is_remote if is_remote else previous.get("is_remote", False) if previous else False,
             "workspace": workspace if workspace else previous.get("workspace", "") if previous else "",
+            "terminal_app": terminal_app if terminal_app else previous.get("terminal_app") if previous else None,
         }
         self.active_session = session_id
         return existing
@@ -873,10 +875,34 @@ class OSController:
         provider = normalize_provider(provider)
         uri = conversation_uri(session_id, provider) if session_id else None
         workspace_name = ""
+        terminal_app = None
         if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
             workspace_name = str(self.sessions.slots[slot].get("workspace") or "")
+            terminal_app = self.sessions.slots[slot].get("terminal_app")
 
         if self.is_mac:
+            # If this session is running in a terminal emulator (e.g. iTerm2 / Terminal)
+            if terminal_app:
+                app_name = "iTerm" if "iterm" in terminal_app.lower() else terminal_app
+                script = f"""
+                try
+                    tell application "{app_name}" to activate
+                end try
+                tell application "System Events"
+                    repeat with p in (every process whose name contains "{app_name}")
+                        set frontmost of p to true
+                        try
+                            tell p to perform action "AXRaise" of window 1
+                        end try
+                    end repeat
+                end tell
+                """
+                try:
+                    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
+                except Exception:
+                    pass
+                return
+
             if provider == PROVIDER_ANTIGRAVITY:
                 script = f"""
                 try
@@ -1315,6 +1341,7 @@ class Bridge:
         pid = payload.get("pid")
         is_remote = bool(payload.get("is_remote", False))
         workspace = str(payload.get("workspace") or "")
+        terminal_app = payload.get("terminal_app")
         slot = self.sessions.update(
             session_id,
             status,
@@ -1324,6 +1351,7 @@ class Bridge:
             pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
             is_remote=is_remote,
             workspace=workspace,
+            terminal_app=str(terminal_app) if terminal_app else None,
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
