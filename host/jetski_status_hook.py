@@ -399,7 +399,14 @@ def main() -> int:
 
     term_prog = str(os.environ.get("TERM_PROGRAM") or "").lower()
     terminal_app = None
-    if "iterm" in term_prog or os.environ.get("ITERM_SESSION_ID"):
+    iterm_raw = os.environ.get("ITERM_SESSION_ID", "")
+    iterm_session_id = ""
+    if ":" in iterm_raw:
+        iterm_session_id = iterm_raw.split(":")[-1]
+    elif iterm_raw:
+        iterm_session_id = iterm_raw
+
+    if "iterm" in term_prog or iterm_raw:
         terminal_app = "iTerm"
     elif "apple_terminal" in term_prog:
         terminal_app = "Terminal"
@@ -424,6 +431,7 @@ def main() -> int:
         "is_remote": is_remote,
         "workspace": workspace_name,
         "terminal_app": terminal_app,
+        "iterm_session_id": iterm_session_id,
     }
 
     try:

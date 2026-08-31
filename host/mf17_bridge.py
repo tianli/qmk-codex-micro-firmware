@@ -432,6 +432,7 @@ class SessionSlots:
         is_remote: bool = False,
         workspace: str | None = None,
         terminal_app: str | None = None,
+        iterm_session_id: str | None = None,
     ) -> int | None:
         now = time.time()
         existing = next(
@@ -466,6 +467,7 @@ class SessionSlots:
             "is_remote": is_remote if is_remote else previous.get("is_remote", False) if previous else False,
             "workspace": workspace if workspace else previous.get("workspace", "") if previous else "",
             "terminal_app": terminal_app if terminal_app else previous.get("terminal_app") if previous else None,
+            "iterm_session_id": iterm_session_id if iterm_session_id else previous.get("iterm_session_id") if previous else None,
         }
         self.active_session = session_id
         return existing
@@ -884,19 +886,76 @@ class OSController:
             # If this session is running in a terminal emulator (e.g. iTerm2 / Terminal)
             if terminal_app:
                 app_name = "iTerm" if "iterm" in terminal_app.lower() else terminal_app
-                script = f"""
-                try
-                    tell application "{app_name}" to activate
-                end try
-                tell application "System Events"
-                    repeat with p in (every process whose name contains "{app_name}")
-                        set frontmost of p to true
-                        try
-                            tell p to perform action "AXRaise" of window 1
-                        end try
-                    end repeat
-                end tell
-                """
+                iterm_sid = ""
+                if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
+                    iterm_sid = str(self.sessions.slots[slot].get("iterm_session_id") or "")
+
+                if app_name == "iTerm":
+                    script = f"""
+                    tell application "iTerm"
+                        activate
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                repeat with s in sessions of t
+                                    if "{iterm_sid}" is not "" and (unique ID of s is "{iterm_sid}" or unique ID of s contains "{iterm_sid}") then
+                                        tell s to select
+                                        tell t to select
+                                        tell application "System Events"
+                                            tell process "iTerm2"
+                                                set frontmost to true
+                                                try
+                                                    perform action "AXRaise" of (first window whose name is (name of w))
+                                                end try
+                                            end tell
+                                        end tell
+                                        return
+                                    end if
+                                end repeat
+                            end repeat
+                        end repeat
+                        repeat with w in windows
+                            repeat with t in tabs of w
+                                repeat with s in sessions of t
+                                    if name of s contains "jetski" or name of w contains "jetski" then
+                                        tell s to select
+                                        tell t to select
+                                        tell application "System Events"
+                                            tell process "iTerm2"
+                                                set frontmost to true
+                                                try
+                                                    perform action "AXRaise" of (first window whose name is (name of w))
+                                                end try
+                                            end tell
+                                        end tell
+                                        return
+                                    end if
+                                end repeat
+                            end repeat
+                        end repeat
+                        tell application "System Events"
+                            tell process "iTerm2"
+                                set frontmost to true
+                                try
+                                    perform action "AXRaise" of window 1
+                                end try
+                            end tell
+                        end tell
+                    end tell
+                    """
+                else:
+                    script = f"""
+                    try
+                        tell application "{app_name}" to activate
+                    end try
+                    tell application "System Events"
+                        repeat with p in (every process whose name contains "{app_name}")
+                            set frontmost of p to true
+                            try
+                                tell p to perform action "AXRaise" of window 1
+                            end try
+                        end repeat
+                    end tell
+                    """
                 try:
                     subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
                 except Exception:
@@ -1342,6 +1401,7 @@ class Bridge:
         is_remote = bool(payload.get("is_remote", False))
         workspace = str(payload.get("workspace") or "")
         terminal_app = payload.get("terminal_app")
+        iterm_session_id = payload.get("iterm_session_id")
         slot = self.sessions.update(
             session_id,
             status,
@@ -1352,6 +1412,7 @@ class Bridge:
             is_remote=is_remote,
             workspace=workspace,
             terminal_app=str(terminal_app) if terminal_app else None,
+            iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
         )
         if slot is not None:
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
