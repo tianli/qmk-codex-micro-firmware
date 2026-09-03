@@ -11,28 +11,26 @@ class HookStatusTests(unittest.TestCase):
         self.assertEqual(event_to_status({}, explicit_event="PreInvocation"), ("thinking", False))
         self.assertEqual(event_to_status({"hook_event_name": "PreInvocation"}), ("thinking", False))
 
-        # PreToolUse with read tool -> thinking (Blue LED)
+        # PreToolUse with active non-interactive tools -> executing (Purple LED)
         self.assertEqual(
             event_to_status({"toolCall": {"name": "view_file"}}, explicit_event="PreToolUse"),
-            ("thinking", False),
+            ("executing", False),
         )
         self.assertEqual(
             event_to_status({"toolCall": {"name": "list_dir"}}, explicit_event="PreToolUse"),
-            ("thinking", False),
+            ("executing", False),
         )
-
-        # PreToolUse with command and edit tools requiring permission -> waiting (Amber LED)
         self.assertEqual(
             event_to_status({"toolCall": {"name": "run_command"}}, explicit_event="PreToolUse"),
-            ("waiting", False),
+            ("executing", False),
         )
         self.assertEqual(
             event_to_status({"toolCall": {"name": "write_to_file"}}, explicit_event="PreToolUse"),
-            ("waiting", False),
+            ("executing", False),
         )
         self.assertEqual(
             event_to_status({"toolCall": {"name": "replace_file_content"}}, explicit_event="PreToolUse"),
-            ("waiting", False),
+            ("executing", False),
         )
 
         # PreToolUse with interactive question / permission tools -> waiting (Amber LED)

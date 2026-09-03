@@ -286,11 +286,11 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"pretooluse", "pre_tool_use"}:
         tool_name = _tool_name(event)
         
-        # If the tool requires permission or is an interactive question -> amber waiting
-        if _is_permission_tool(tool_name):
+        # If the tool is an interactive question or permission prompt -> amber waiting
+        if _is_interactive_tool(tool_name):
             return "waiting", False
-        # Silent read tools (view_file, list_dir, grep_search) -> blue thinking
-        return "thinking", False
+        # Active tool execution (run_command, file edits, search tools, etc.) -> purple executing
+        return "executing", False
 
     # PostToolUse: Tool completed execution
     if name in {"posttooluse", "post_tool_use"}:

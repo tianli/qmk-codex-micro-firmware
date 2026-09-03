@@ -94,6 +94,7 @@ STATUS_IDS = {
     "complete": 3,
     "waiting": 4,
     "error": 5,
+    "executing": 2,
 }
 
 
@@ -490,7 +491,7 @@ class SessionSlots:
             return None
 
         current_status = self.slots[existing]["status"]
-        if current_status != "thinking":
+        if current_status not in {"thinking", "executing"}:
             return None
 
         now = time.time()
@@ -1389,6 +1390,13 @@ class Bridge:
             self.completed_override_keys.add(key_name)
             try:
                 for r in self.lighting.encode({"key": key_name, "rgb": [0, 255, 0]}):
+                    self.send_report(r)
+            except Exception:
+                pass
+        elif status == "executing":
+            self.completed_override_keys.add(key_name)
+            try:
+                for r in self.lighting.encode({"key": key_name, "rgb": [180, 0, 255]}):
                     self.send_report(r)
             except Exception:
                 pass
