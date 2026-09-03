@@ -1192,6 +1192,7 @@ class Bridge:
         self.lighting_capabilities = 0
         self.lighting_key_count = KEY_COUNT
         self.action_protocol_version = PROTOCOL_VERSION
+        self.completed_override_keys: set[str] = set()
 
     def log(self, message: str) -> None:
         if self.dry_run:
@@ -1285,6 +1286,7 @@ class Bridge:
                     sid = item["session_id"]
                     self.sessions.update(sid, "off", remove=True)
                     self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+                    self.update_slot_lighting(slot, "off")
                     self.log(f"session {sid} window (PID {pid}) closed -> turned off slot {slot}")
 
         if self.active_only:
@@ -1308,6 +1310,7 @@ class Bridge:
                 slot = self.sessions.reconcile_terminal(session_id, state)
                 if slot is not None:
                     self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
+                    self.update_slot_lighting(slot, state)
                     self.log(
                         f"reconciled session={session_id} state={state} "
                         f"key={NUMERIC_KEY_BY_SLOT[slot]}"
@@ -1380,10 +1383,28 @@ class Bridge:
         elif self.device:
             self.device.write(bytes([0]) + report)
 
+    def update_slot_lighting(self, slot: int, status: str) -> None:
+        key_name = str(NUMERIC_KEY_BY_SLOT[slot])
+        if status == "complete":
+            self.completed_override_keys.add(key_name)
+            try:
+                for r in self.lighting.encode({"key": key_name, "rgb": [0, 255, 0]}):
+                    self.send_report(r)
+            except Exception:
+                pass
+        elif key_name in self.completed_override_keys:
+            self.completed_override_keys.remove(key_name)
+            try:
+                for r in self.lighting.encode({"clear_key": key_name}):
+                    self.send_report(r)
+            except Exception:
+                pass
+
     def sync_leds(self) -> None:
         for slot, item in enumerate(self.sessions.slots):
             state = item["status"] if item else "off"
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
+            self.update_slot_lighting(slot, state)
 
     def process_status(self, payload: dict[str, Any], source: str = "udp") -> None:
         raw_status = payload.get("status", "idle")
@@ -1419,7 +1440,9 @@ class Bridge:
             iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
         )
         if slot is not None:
-            self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off" if payload.get("remove") else status]])
+            eff_status = "off" if payload.get("remove") else status
+            self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_status]])
+            self.update_slot_lighting(slot, eff_status)
             self.log(
                 f"status provider={provider} session={session_id} state={status} "
                 f"key={NUMERIC_KEY_BY_SLOT[slot]}"

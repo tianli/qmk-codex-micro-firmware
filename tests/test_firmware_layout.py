@@ -55,7 +55,7 @@ class FirmwareLayoutTests(unittest.TestCase):
         expected = {
             "STATUS_IDLE": (255, 255, 255),
             "STATUS_THINKING": (48, 79, 254),
-            "STATUS_COMPLETE": (0, 255, 76),
+            "STATUS_COMPLETE": (0, 255, 0),
             "STATUS_WAITING": (255, 109, 0),
             "STATUS_ERROR": (255, 0, 51),
         }

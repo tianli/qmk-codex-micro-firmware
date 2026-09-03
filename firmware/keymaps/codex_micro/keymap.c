@@ -401,7 +401,7 @@ static rgb_t status_color(uint8_t status) {
     switch (status) {
         case STATUS_IDLE:     return (rgb_t){255, 255, 255};
         case STATUS_THINKING: return (rgb_t){48, 79, 254};
-        case STATUS_COMPLETE: return (rgb_t){0, 255, 76};
+        case STATUS_COMPLETE: return (rgb_t){0, 255, 0};
         case STATUS_WAITING:  return (rgb_t){255, 109, 0};
         case STATUS_ERROR:    return (rgb_t){255, 0, 51};
         default:              return (rgb_t){0, 0, 0};
