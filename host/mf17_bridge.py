@@ -1385,7 +1385,7 @@ class Bridge:
             state = item["status"] if item else "off"
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
 
-    def process_status(self, payload: dict[str, Any]) -> None:
+    def process_status(self, payload: dict[str, Any], source: str = "udp") -> None:
         raw_status = payload.get("status", "idle")
         status = raw_status if isinstance(raw_status, str) and raw_status in STATUS_IDS else "idle"
         kind = str(payload.get("kind") or "")
@@ -1398,7 +1398,11 @@ class Bridge:
             or "unknown"
         )
         pid = payload.get("pid")
-        is_remote = bool(payload.get("is_remote", False))
+        is_remote = bool(payload.get("is_remote", False)) or source == "tcp"
+        if not is_remote and isinstance(pid, (int, str)) and str(pid).isdigit():
+            # Standard macOS PID_MAX is 99999. PIDs > 100000 are Linux / Cloudtop processes
+            if int(pid) > 100000:
+                is_remote = True
         workspace = str(payload.get("workspace") or "")
         terminal_app = payload.get("terminal_app")
         iterm_session_id = payload.get("iterm_session_id")
@@ -1567,7 +1571,7 @@ class Bridge:
                                     payload = json.loads(line)
                                     kind = payload.get("kind")
                                     if kind in {"jetski_status", "antigravity_status", "codex_status"}:
-                                        self.process_status(payload)
+                                        self.process_status(payload, source="tcp")
                                     elif kind == "lighting":
                                         self.process_lighting(payload)
                                 except json.JSONDecodeError:

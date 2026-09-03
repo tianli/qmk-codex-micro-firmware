@@ -388,7 +388,15 @@ def main() -> int:
     
     import os
     ppid = os.getppid()
-    is_remote = bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"))
+    is_remote = bool(
+        os.environ.get("SSH_CLIENT")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+        or os.environ.get("VSCODE_REMOTE_CONTAINERS_SESSION")
+        or os.environ.get("REMOTE_SSH")
+        or os.path.exists("/etc/cloudtop-release")
+        or sys.platform.startswith("linux")
+    )
 
     workspace_paths = payload.get("workspacePaths") or payload.get("workspace_paths") or []
     workspace_name = ""

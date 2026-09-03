@@ -182,12 +182,24 @@ class SessionSlotTests(unittest.TestCase):
 
     def test_refresh_recent_sessions_cleans_terminated_pid(self):
         bridge = Bridge(Path("host/actions.json"), dry_run=True, active_only=True)
-        bridge.sessions.update("dead_proc_session", "complete", from_hook=True, pid=99999999)
+        bridge.sessions.update("dead_proc_session", "complete", from_hook=True, pid=99999)
         self.assertEqual(bridge.sessions.session_for_slot(0), "dead_proc_session")
 
         # Running refresh_recent_sessions should detect dead PID and clear slot
         bridge.refresh_recent_sessions()
         self.assertIsNone(bridge.sessions.session_for_slot(0))
+
+    def test_refresh_recent_sessions_preserves_remote_sessions(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True, active_only=True)
+        # Process status via TCP from Cloudtop with Linux PID
+        bridge.process_status({"kind": "jetski_status", "session_id": "cloudtop_session", "status": "complete", "pid": 773931}, source="tcp")
+        self.assertEqual(bridge.sessions.session_for_slot(0), "cloudtop_session")
+        self.assertTrue(bridge.sessions.slots[0]["is_remote"])
+
+        # Running refresh_recent_sessions should NOT remove remote session
+        bridge.refresh_recent_sessions()
+        self.assertEqual(bridge.sessions.session_for_slot(0), "cloudtop_session")
+        self.assertEqual(bridge.sessions.slots[0]["status"], "complete")
 
     def test_terminal_reconciliation_respects_recent_hook(self):
         slots = SessionSlots()
