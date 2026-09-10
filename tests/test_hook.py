@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from host.jetski_status_hook import event_to_status
@@ -61,10 +63,24 @@ class HookStatusTests(unittest.TestCase):
             ("error", False),
         )
 
-        # Stop without error -> complete (Green LED)
+        # Stop without error and fully idle -> complete (Green LED)
+        self.assertEqual(
+            event_to_status({"terminationReason": "model_stop", "fullyIdle": True}, explicit_event="Stop"),
+            ("complete", False),
+        )
         self.assertEqual(
             event_to_status({"terminationReason": "model_stop"}, explicit_event="Stop"),
             ("complete", False),
+        )
+
+        # Stop while background tasks/subagents are running (fullyIdle is False) -> executing (Purple LED)
+        self.assertEqual(
+            event_to_status({"terminationReason": "model_stop", "fullyIdle": False}, explicit_event="Stop"),
+            ("executing", False),
+        )
+        self.assertEqual(
+            event_to_status({"terminationReason": "model_stop", "fully_idle": False}, explicit_event="Stop"),
+            ("executing", False),
         )
 
         # Stop with error -> error (Red LED)
@@ -161,6 +177,58 @@ class HookStatusTests(unittest.TestCase):
             event_to_status({"isSubagent": True}, explicit_event="SubagentStop"),
             ("complete", False),
         )
+
+    def test_stop_with_running_background_task_in_transcript(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            transcript = Path(tmp_dir) / "transcript.jsonl"
+            lines = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE"},
+                {
+                    "step_index": 1,
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": "Tool is running as a background task with task id: sess/task-1",
+                },
+                {
+                    "step_index": 2,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "I launched task-1 in background.",
+                },
+            ]
+            transcript.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+
+            # With task-1 running, Stop should report executing
+            self.assertEqual(
+                event_to_status(
+                    {"terminationReason": "model_stop", "transcriptPath": str(transcript)},
+                    explicit_event="Stop",
+                ),
+                ("executing", False),
+            )
+
+            # Once task-1 is finished, Stop should report complete
+            lines.append({
+                "step_index": 3,
+                "type": "SYSTEM_MESSAGE",
+                "status": "DONE",
+                "content": "<notifications>\nTask sess/task-1 finished with the following output: success",
+            })
+            lines.append({
+                "step_index": 4,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "content": "Task finished successfully.",
+            })
+            transcript.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+
+            self.assertEqual(
+                event_to_status(
+                    {"terminationReason": "model_stop", "transcriptPath": str(transcript)},
+                    explicit_event="Stop",
+                ),
+                ("complete", False),
+            )
 
 
 if __name__ == "__main__":

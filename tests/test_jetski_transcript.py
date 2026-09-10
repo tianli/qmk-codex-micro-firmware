@@ -102,6 +102,49 @@ class JetskiTranscriptTests(unittest.TestCase):
             p.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
             self.assertEqual(latest_transcript_state(p), "complete")
 
+    def test_running_background_task_is_executing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p = Path(tmp_dir) / "transcript.jsonl"
+            lines = [
+                {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE"},
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": "Tool is running as a background task with task id: 0ec2d/task-17",
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [],
+                    "content": "Running in background.",
+                },
+            ]
+            p.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+            self.assertEqual(latest_transcript_state(p), "executing")
+
+            # Once the task finishes notification is added, state resolves to complete
+            lines.append({
+                "step_index": 3,
+                "source": "SYSTEM",
+                "type": "SYSTEM_MESSAGE",
+                "status": "DONE",
+                "content": "<notifications>\nTask 0ec2d/task-17 finished with the following output: ok",
+            })
+            lines.append({
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [],
+                "content": "All done!",
+            })
+            p.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+            self.assertEqual(latest_transcript_state(p), "complete")
+
 
 if __name__ == "__main__":
     unittest.main()

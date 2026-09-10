@@ -334,6 +334,10 @@ def latest_transcript_state(path: Path) -> str | None:
         return None
 
     completed_codex_calls: set[str] = set()
+    completed_tasks: set[str] = set()
+    running_tasks: set[str] = set()
+    latest_terminal_state: str | None = None
+
     for raw_line in reversed(lines):
         try:
             record = json.loads(raw_line)
@@ -342,6 +346,19 @@ def latest_transcript_state(path: Path) -> str | None:
 
         step_type = record.get("type", "")
         status = record.get("status", "")
+
+        # Track background task completions and starts
+        content = str(record.get("content") or "")
+        for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
+            completed_tasks.add(m.group(1))
+
+        if status == "RUNNING":
+            m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
+            if m:
+                if m.group(1) not in completed_tasks:
+                    running_tasks.add(m.group(1))
+            else:
+                running_tasks.add("generic_running_task")
 
         # Codex app transcripts record a pending request_user_input as a
         # response_item/function_call. It does not necessarily dispatch a
@@ -371,7 +388,9 @@ def latest_transcript_state(path: Path) -> str | None:
             return "waiting"
 
         if step_type == "USER_INPUT":
-            return None
+            if running_tasks:
+                return "executing"
+            return latest_terminal_state
 
         if step_type == "PLANNER_RESPONSE" or status in {"DONE", "ERROR"}:
             tool_calls = record.get("tool_calls") or []
@@ -382,14 +401,15 @@ def latest_transcript_state(path: Path) -> str | None:
             if status == "ERROR" or record.get("error"):
                 return "error"
             
-            content = str(record.get("content") or "")
             if _looks_like_user_prompt(content):
                 return "waiting"
 
             if status == "DONE" and not tool_calls:
-                return "complete"
-            if status == "DONE" and tool_calls:
-                return None
+                if latest_terminal_state is None:
+                    latest_terminal_state = "complete"
+            elif status == "DONE" and tool_calls:
+                if latest_terminal_state is None:
+                    latest_terminal_state = None
 
         # Codex transcript fallback
         if record.get("type") == "event_msg":
@@ -401,7 +421,10 @@ def latest_transcript_state(path: Path) -> str | None:
             if event_type == "task_started":
                 return None
 
-    return None
+    if running_tasks:
+        return "executing"
+
+    return latest_terminal_state
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -1343,6 +1366,7 @@ class Bridge:
             slot = self.sessions.reconcile_terminal(session_id, state)
             if slot is not None:
                 self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
+                self.update_slot_lighting(slot, state)
                 self.log(
                     f"reconciled session={session_id} state={state} "
                     f"key={NUMERIC_KEY_BY_SLOT[slot]}"

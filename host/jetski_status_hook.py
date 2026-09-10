@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import re
 import socket
 import sys
@@ -250,10 +251,53 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
     return ""
 
 
+def _has_running_background_tasks(event: dict[str, Any]) -> bool:
+    """Return True if background tasks or subagents are still running."""
+    # 1. Antigravity protojson explicitly passes fullyIdle: false when background tasks/subagents run
+    if event.get("fullyIdle") is False or event.get("fully_idle") is False:
+        return True
+
+    # 2. Inspect transcript tail for any uncompleted background tasks
+    tpath = event.get("transcriptPath") or event.get("transcript_path")
+    if tpath:
+        try:
+            p = Path(tpath)
+            if p.exists():
+                with open(p, "rb") as f:
+                    size = f.seek(0, 2)
+                    f.seek(max(0, size - 256 * 1024))
+                    lines = f.readlines()
+
+                completed_tasks: set[str] = set()
+                for line in reversed(lines):
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+
+                    if rec.get("type") == "USER_INPUT":
+                        break
+
+                    content = str(rec.get("content") or "")
+                    for m in re.finditer(r"Task\s+([\w\-/]+)\s+finished", content, re.IGNORECASE):
+                        completed_tasks.add(m.group(1))
+
+                    if rec.get("status") == "RUNNING":
+                        m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
+                        if m:
+                            if m.group(1) not in completed_tasks:
+                                return True
+                        else:
+                            return True
+        except Exception:
+            pass
+    return False
+
+
 def event_to_status(event: dict[str, Any], explicit_event: str | None = None) -> tuple[str, bool]:
     """Map hook event payload to (status, remove_slot).
     
-    Status can be: 'off', 'idle', 'thinking', 'complete', 'waiting', 'error'.
+    Status can be: 'off', 'idle', 'thinking', 'complete', 'waiting', 'error', 'executing'.
     """
     name = _event_name(event, explicit_event)
     has_error = bool(event.get("error")) or _contains_error(event.get("tool_response"))
@@ -263,6 +307,7 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         return "off", True
 
     # Stop -> complete (Green) unless explicit question/prompt was asked (Amber)
+    # or background tasks/subagents are still running (Purple executing)
     if name in {"stop", "subagentstop", "subagent_stop"}:
         if has_error:
             return "error", False
@@ -275,6 +320,9 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         last_msg = _get_last_assistant_message(event)
         if _looks_like_user_prompt(last_msg):
             return "waiting", False
+
+        if _has_running_background_tasks(event):
+            return "executing", False
 
         return "complete", False
 
@@ -326,6 +374,8 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
             return "error", False
         if _contains_waiting_signal(event) or any(marker in reason for marker in WAITING_REASON_MARKERS):
             return "waiting", False
+        if _has_running_background_tasks(event):
+            return "executing", False
         return "complete", False
 
     if has_error:
