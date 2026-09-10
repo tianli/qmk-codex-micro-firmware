@@ -534,14 +534,23 @@ class SessionSlots:
             return None
 
         now = time.time()
-        # If a waiting or executing (background task) signal was found in transcript:
+
+        # Premature complete recovery: only if background tasks are actively running in the transcript
+        if current_status == "complete":
+            if status == "executing":
+                self.slots[existing]["status"] = "executing"
+                self.slots[existing]["updated"] = now
+                return existing
+            return None
+
+        if current_status not in {"thinking", "executing"}:
+            return None
+
+        # If an active thinking/executing session has a waiting or executing signal in transcript:
         if status in {"waiting", "executing"}:
             self.slots[existing]["status"] = status
             self.slots[existing]["updated"] = now
             return existing
-
-        if current_status not in {"thinking", "executing"}:
-            return None
 
         # Resolve stale thinking after timeout
         last_hook = self.slots[existing].get("last_hook_time", 0)
