@@ -284,6 +284,27 @@ class HookStatusTests(unittest.TestCase):
                 ("complete", False),
             )
 
+    def test_message_with_code_block_containing_question_mark_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            transcript = Path(tmp_dir) / "transcript.jsonl"
+            lines = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE"},
+                {
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Here is regex:\n```python\npattern = r'Task(?:\\s+id)?'\n```\nAll done.",
+                },
+            ]
+            transcript.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+            self.assertEqual(
+                event_to_status(
+                    {"terminationReason": "model_stop", "transcriptPath": str(transcript)},
+                    explicit_event="Stop",
+                ),
+                ("complete", False),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

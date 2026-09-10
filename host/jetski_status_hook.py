@@ -175,11 +175,16 @@ def _looks_like_user_prompt(message: Any) -> bool:
     """Return true for a final assistant message that asks the user to respond."""
     if not isinstance(message, str):
         return False
-    text = " ".join(message.strip().split())
+
+    # Strip code blocks, inline code, and markdown links so that regex/code symbols like '?' don't trigger false positives
+    clean_text = re.sub(r"```[\s\S]*?```", " ", message)
+    clean_text = re.sub(r"`[^`\n]*?`", " ", clean_text)
+    clean_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean_text)
+    text = " ".join(clean_text.strip().split())
     if not text:
         return False
 
-    tail = text[-800:]
+    tail = text[-600:]
 
     # Check if there is any question mark in the final block of the message
     if "?" in tail:
