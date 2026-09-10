@@ -184,13 +184,12 @@ def _looks_like_user_prompt(message: Any) -> bool:
     if not text:
         return False
 
-    tail = text[-600:]
-
-    # Check if there is any question mark in the final block of the message
-    if "?" in tail:
+    # 1. Does the message conclude with a question mark?
+    if text.rstrip(" *_\t\n\r.)").endswith("?"):
         return True
 
-    # Check for prompt/instruction phrases in the final block
+    # 2. Check for explicit prompt/instruction phrases in the final block
+    tail = text[-500:]
     return any(
         re.search(pattern, tail, flags=re.IGNORECASE)
         for pattern in USER_PROMPT_PATTERNS
