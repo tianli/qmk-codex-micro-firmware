@@ -145,6 +145,47 @@ class JetskiTranscriptTests(unittest.TestCase):
             p.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
             self.assertEqual(latest_transcript_state(p), "complete")
 
+    def test_running_background_task_with_intervening_notification_is_executing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p = Path(tmp_dir) / "transcript.jsonl"
+            lines = [
+                {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE"},
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": "Tool is running as a background task with task id: 0ec2d/task-17",
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [],
+                    "content": "Started background command.",
+                },
+                # Intervening progress notification turn
+                {
+                    "step_index": 3,
+                    "source": "SYSTEM",
+                    "type": "USER_INPUT",
+                    "status": "DONE",
+                    "content": "Background command is still running after 60 seconds",
+                },
+                {
+                    "step_index": 4,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [],
+                    "content": "Acknowledged, continuing to wait.",
+                },
+            ]
+            p.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+            # Should still be executing because task-17 is not finished
+            self.assertEqual(latest_transcript_state(p), "executing")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -198,11 +198,32 @@ class HookStatusTests(unittest.TestCase):
             ]
             transcript.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
 
-            # With task-1 running, Stop should report executing
+            # With task-1 running, Stop, PreInvocation, PostToolUse, PostInvocation should report executing
             self.assertEqual(
                 event_to_status(
                     {"terminationReason": "model_stop", "transcriptPath": str(transcript)},
                     explicit_event="Stop",
+                ),
+                ("executing", False),
+            )
+            self.assertEqual(
+                event_to_status(
+                    {"transcriptPath": str(transcript)},
+                    explicit_event="PreInvocation",
+                ),
+                ("executing", False),
+            )
+            self.assertEqual(
+                event_to_status(
+                    {"transcriptPath": str(transcript), "tool_name": "run_command"},
+                    explicit_event="PostToolUse",
+                ),
+                ("executing", False),
+            )
+            self.assertEqual(
+                event_to_status(
+                    {"transcriptPath": str(transcript)},
+                    explicit_event="PostInvocation",
                 ),
                 ("executing", False),
             )

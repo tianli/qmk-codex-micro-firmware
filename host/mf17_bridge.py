@@ -336,6 +336,25 @@ def latest_transcript_state(path: Path) -> str | None:
     completed_codex_calls: set[str] = set()
     completed_tasks: set[str] = set()
     running_tasks: set[str] = set()
+
+    # Pass 1: Identify any uncompleted background tasks in the transcript tail
+    for raw_line in reversed(lines):
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        content = str(record.get("content") or "")
+        for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
+            completed_tasks.add(m.group(1))
+
+        if record.get("status") == "RUNNING" or "running as a background task with task id" in content.lower():
+            m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
+            if m:
+                if m.group(1) not in completed_tasks:
+                    running_tasks.add(m.group(1))
+            else:
+                running_tasks.add("generic_running_task")
+
     latest_terminal_state: str | None = None
 
     for raw_line in reversed(lines):
@@ -346,19 +365,7 @@ def latest_transcript_state(path: Path) -> str | None:
 
         step_type = record.get("type", "")
         status = record.get("status", "")
-
-        # Track background task completions and starts
         content = str(record.get("content") or "")
-        for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
-            completed_tasks.add(m.group(1))
-
-        if status == "RUNNING":
-            m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
-            if m:
-                if m.group(1) not in completed_tasks:
-                    running_tasks.add(m.group(1))
-            else:
-                running_tasks.add("generic_running_task")
 
         # Codex app transcripts record a pending request_user_input as a
         # response_item/function_call. It does not necessarily dispatch a
@@ -514,15 +521,18 @@ class SessionSlots:
             return None
 
         current_status = self.slots[existing]["status"]
-        if current_status not in {"thinking", "executing"}:
+        if current_status == status or current_status == "error":
             return None
 
         now = time.time()
-        # If the session is actively thinking and a waiting signal was found in transcript:
-        if status == "waiting":
-            self.slots[existing]["status"] = "waiting"
+        # If a waiting or executing (background task) signal was found in transcript:
+        if status in {"waiting", "executing"}:
+            self.slots[existing]["status"] = status
             self.slots[existing]["updated"] = now
             return existing
+
+        if current_status not in {"thinking", "executing"}:
+            return None
 
         # Resolve stale thinking after timeout
         last_hook = self.slots[existing].get("last_hook_time", 0)
@@ -1475,8 +1485,10 @@ class Bridge:
             eff_status = "off" if payload.get("remove") else status
             self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_status]])
             self.update_slot_lighting(slot, eff_status)
+            ev = payload.get("event") or ""
+            ev_str = f" event={ev}" if ev else ""
             self.log(
-                f"status provider={provider} session={session_id} state={status} "
+                f"status provider={provider} session={session_id} state={status}{ev_str} "
                 f"key={NUMERIC_KEY_BY_SLOT[slot]}"
             )
 

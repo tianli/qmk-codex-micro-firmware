@@ -257,8 +257,20 @@ def _has_running_background_tasks(event: dict[str, Any]) -> bool:
     if event.get("fullyIdle") is False or event.get("fully_idle") is False:
         return True
 
-    # 2. Inspect transcript tail for any uncompleted background tasks
+    # 2. Check if the current tool_response or event itself indicates a background task
+    tool_resp = str(event.get("tool_response") or "")
+    if "running as a background task" in tool_resp.lower() or "background task with task id" in tool_resp.lower():
+        return True
+
+    # 3. Inspect transcript tail for any uncompleted background tasks
     tpath = event.get("transcriptPath") or event.get("transcript_path")
+    if not tpath:
+        conv_id = event.get("conversationId") or event.get("conversation_id") or event.get("session_id")
+        if conv_id:
+            cand = Path.home() / ".gemini" / "jetski" / "brain" / str(conv_id) / ".system_generated" / "logs" / "transcript.jsonl"
+            if cand.exists():
+                tpath = str(cand)
+
     if tpath:
         try:
             p = Path(tpath)
@@ -269,26 +281,28 @@ def _has_running_background_tasks(event: dict[str, Any]) -> bool:
                     lines = f.readlines()
 
                 completed_tasks: set[str] = set()
+                running_tasks: set[str] = set()
                 for line in reversed(lines):
                     try:
                         rec = json.loads(line)
                     except Exception:
                         continue
 
-                    if rec.get("type") == "USER_INPUT":
-                        break
-
                     content = str(rec.get("content") or "")
-                    for m in re.finditer(r"Task\s+([\w\-/]+)\s+finished", content, re.IGNORECASE):
+                    for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
                         completed_tasks.add(m.group(1))
 
-                    if rec.get("status") == "RUNNING":
+                    if rec.get("status") == "RUNNING" or "running as a background task with task id" in content.lower():
                         m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
                         if m:
-                            if m.group(1) not in completed_tasks:
-                                return True
+                            task_id = m.group(1)
+                            if task_id not in completed_tasks:
+                                running_tasks.add(task_id)
                         else:
-                            return True
+                            running_tasks.add("generic_task")
+
+                if running_tasks:
+                    return True
         except Exception:
             pass
     return False
@@ -347,10 +361,14 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         tool_name = _tool_name(event)
         if _is_interactive_tool(tool_name) or _contains_waiting_signal(event.get("tool_response")):
             return "waiting", False
+        if _has_running_background_tasks(event):
+            return "executing", False
         return "thinking", False
 
     # PreInvocation: Model is generating / thinking
     if name in {"preinvocation", "pre_invocation", "userpromptsubmit", "user_prompt_submit", "subagentstart", "subagent_start"}:
+        if _has_running_background_tasks(event):
+            return "executing", False
         return "thinking", False
 
     if name in {"postinvocation", "post_invocation"}:
@@ -359,6 +377,8 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
         last_msg = _get_last_assistant_message(event)
         if _looks_like_user_prompt(last_msg):
             return "waiting", False
+        if _has_running_background_tasks(event):
+            return "executing", False
         return "complete", False
 
     # Fallback inspection if event name wasn't explicitly supplied
@@ -380,6 +400,9 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
 
     if has_error:
         return "error", False
+
+    if _has_running_background_tasks(event):
+        return "executing", False
 
     return "idle", False
 
