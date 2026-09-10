@@ -251,6 +251,10 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
     return ""
 
 
+def _normalize_task_id(tid: str) -> str:
+    return tid.strip("\"'").split("/")[-1]
+
+
 def _has_running_background_tasks(event: dict[str, Any]) -> bool:
     """Return True if background tasks or subagents are still running."""
     # 1. Antigravity protojson explicitly passes fullyIdle: false when background tasks/subagents run
@@ -258,9 +262,11 @@ def _has_running_background_tasks(event: dict[str, Any]) -> bool:
         return True
 
     # 2. Check if the current tool_response or event itself indicates a background task
-    tool_resp = str(event.get("tool_response") or "")
-    if "running as a background task" in tool_resp.lower() or "background task with task id" in tool_resp.lower():
-        return True
+    tool_name = _tool_name(event)
+    if tool_name in {"run_command", "bash", "execute_command", "terminal"}:
+        tool_resp = str(event.get("tool_response") or "")
+        if "running as a background task" in tool_resp.lower() or "sent to the background as a task" in tool_resp.lower():
+            return True
 
     # 3. Inspect transcript tail for any uncompleted background tasks
     tpath = event.get("transcriptPath") or event.get("transcript_path")
@@ -289,16 +295,16 @@ def _has_running_background_tasks(event: dict[str, Any]) -> bool:
                         continue
 
                     content = str(rec.get("content") or "")
-                    for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
-                        completed_tasks.add(m.group(1))
+                    for m in re.finditer(r"Task(?:\s+id)?\s+[\"']?([\w\-/]+)[\"']?\s+(?:was\s+)?(?:finished|completed|failed|killed|timed\s*out|terminated|canceled|cancelled)", content, re.IGNORECASE):
+                        completed_tasks.add(_normalize_task_id(m.group(1)))
 
-                    if rec.get("status") == "RUNNING" or "running as a background task with task id" in content.lower():
-                        m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
+                    if rec.get("status") == "RUNNING" and rec.get("type") in {"GENERIC", "TOOL_USE", "TOOL_CALL"}:
+                        m = re.search(r"task id:\s*[\"']?([\w\-/]+)", content, re.IGNORECASE)
                         if m:
-                            task_id = m.group(1)
+                            task_id = _normalize_task_id(m.group(1))
                             if task_id not in completed_tasks:
                                 running_tasks.add(task_id)
-                        else:
+                        elif "running as a background task" in content.lower():
                             running_tasks.add("generic_task")
 
                 if running_tasks:

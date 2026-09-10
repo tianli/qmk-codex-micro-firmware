@@ -333,6 +333,9 @@ def latest_transcript_state(path: Path) -> str | None:
     except OSError:
         return None
 
+    def _norm_tid(tid: str) -> str:
+        return tid.strip("\"'").split("/")[-1]
+
     completed_codex_calls: set[str] = set()
     completed_tasks: set[str] = set()
     running_tasks: set[str] = set()
@@ -344,15 +347,16 @@ def latest_transcript_state(path: Path) -> str | None:
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
         content = str(record.get("content") or "")
-        for m in re.finditer(r"Task\s+([\w\-/]+)\s+(?:finished|completed|failed|killed|timed\s*out|terminated)", content, re.IGNORECASE):
-            completed_tasks.add(m.group(1))
+        for m in re.finditer(r"Task(?:\s+id)?\s+[\"']?([\w\-/]+)[\"']?\s+(?:was\s+)?(?:finished|completed|failed|killed|timed\s*out|terminated|canceled|cancelled)", content, re.IGNORECASE):
+            completed_tasks.add(_norm_tid(m.group(1)))
 
-        if record.get("status") == "RUNNING" or "running as a background task with task id" in content.lower():
-            m = re.search(r"task id:\s*([\w\-/]+)", content, re.IGNORECASE)
+        if record.get("status") == "RUNNING" and record.get("type") in {"GENERIC", "TOOL_USE", "TOOL_CALL"}:
+            m = re.search(r"task id:\s*[\"']?([\w\-/]+)", content, re.IGNORECASE)
             if m:
-                if m.group(1) not in completed_tasks:
-                    running_tasks.add(m.group(1))
-            else:
+                task_id = _norm_tid(m.group(1))
+                if task_id not in completed_tasks:
+                    running_tasks.add(task_id)
+            elif "running as a background task" in content.lower():
                 running_tasks.add("generic_running_task")
 
     latest_terminal_state: str | None = None
@@ -399,7 +403,7 @@ def latest_transcript_state(path: Path) -> str | None:
                 return "executing"
             return latest_terminal_state
 
-        if step_type == "PLANNER_RESPONSE" or status in {"DONE", "ERROR"}:
+        if step_type in {"PLANNER_RESPONSE", "assistant_message"}:
             tool_calls = record.get("tool_calls") or []
             for tc in tool_calls:
                 tname = str(tc.get("name", "")).lower()

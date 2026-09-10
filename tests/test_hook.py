@@ -251,6 +251,39 @@ class HookStatusTests(unittest.TestCase):
                 ("complete", False),
             )
 
+    def test_background_task_canceled_reports_complete(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            transcript = Path(tmp_dir) / "transcript.jsonl"
+            lines = [
+                {"step_index": 0, "type": "USER_INPUT", "status": "DONE"},
+                {
+                    "step_index": 1,
+                    "type": "GENERIC",
+                    "status": "RUNNING",
+                    "content": "Tool is running as a background task with task id: sess/task-2",
+                },
+                {
+                    "step_index": 2,
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "content": 'Task "sess/task-2" cancelled.',
+                },
+                {
+                    "step_index": 3,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "content": "Task was canceled.",
+                },
+            ]
+            transcript.write_text("\n".join(json.dumps(l) for l in lines), encoding="utf-8")
+            self.assertEqual(
+                event_to_status(
+                    {"terminationReason": "model_stop", "transcriptPath": str(transcript)},
+                    explicit_event="Stop",
+                ),
+                ("complete", False),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
