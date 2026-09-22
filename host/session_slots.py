@@ -56,6 +56,7 @@ class SessionSlots:
         workspace: str | None = None,
         terminal_app: str | None = None,
         iterm_session_id: str | None = None,
+        tty: str | None = None,
     ) -> int | None:
         now = time.time()
         existing = next(
@@ -91,6 +92,7 @@ class SessionSlots:
             "workspace": workspace if workspace else previous.get("workspace", "") if previous else "",
             "terminal_app": terminal_app if terminal_app else previous.get("terminal_app") if previous else None,
             "iterm_session_id": iterm_session_id if iterm_session_id else previous.get("iterm_session_id") if previous else None,
+            "tty": tty if tty else previous.get("tty") if previous else None,
         }
         self.active_session = session_id
         return existing

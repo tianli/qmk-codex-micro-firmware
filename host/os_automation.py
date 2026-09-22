@@ -558,31 +558,89 @@ class OSController:
 
     def open_thread(self, session_id: str | None, slot: int = 0, provider: str = PROVIDER_ANTIGRAVITY) -> None:
         """Activate Codex or Antigravity and focus the selected conversation."""
+        if not session_id:
+            return
         self.record_current_window()
         provider = normalize_provider(provider)
         uri = conversation_uri(session_id, provider) if session_id else None
         workspace_name = ""
         terminal_app = None
+        iterm_sid = ""
+        tty = ""
+        pid = None
         if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
-            workspace_name = str(self.sessions.slots[slot].get("workspace") or "")
-            terminal_app = self.sessions.slots[slot].get("terminal_app")
+            slot_item = self.sessions.slots[slot]
+            workspace_name = str(slot_item.get("workspace") or "")
+            terminal_app = slot_item.get("terminal_app")
+            iterm_sid = str(slot_item.get("iterm_session_id") or "")
+            tty = str(slot_item.get("tty") or "")
+            pid = slot_item.get("pid")
 
         if self.is_mac:
+            # If terminal_app is not set, infer whether this session is running in a terminal emulator
+            if not terminal_app:
+                if pid and pid > 0:
+                    try:
+                        res = subprocess.run(
+                            ["ps", "-p", str(pid), "-o", "tty="],
+                            capture_output=True,
+                            text=True,
+                            timeout=0.5,
+                        )
+                        t = res.stdout.strip()
+                        if t and t not in {"??", "-"}:
+                            tty = t
+                            terminal_app = "iTerm"
+                    except Exception:
+                        pass
+                if not terminal_app and provider == PROVIDER_ANTIGRAVITY:
+                    # Check if any CLI jetski process is currently attached to a local tty
+                    try:
+                        res = subprocess.run(
+                            ["ps", "-eo", "pid,tty,comm"],
+                            capture_output=True,
+                            text=True,
+                            timeout=0.5,
+                        )
+                        for line in res.stdout.splitlines():
+                            parts = line.strip().split(None, 2)
+                            if len(parts) == 3:
+                                p_pid, p_tty, p_comm = parts
+                                comm_lower = p_comm.lower()
+                                if "jetski" in comm_lower and "helper" not in comm_lower and "applications" not in comm_lower:
+                                    if p_tty not in {"??", "-"}:
+                                        tty = p_tty
+                                        terminal_app = "iTerm"
+                                        break
+                    except Exception:
+                        pass
+
             # If this session is running in a terminal emulator (e.g. iTerm2 / Terminal)
             if terminal_app:
                 app_name = "iTerm" if "iterm" in terminal_app.lower() else terminal_app
-                iterm_sid = ""
                 if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
-                    iterm_sid = str(self.sessions.slots[slot].get("iterm_session_id") or "")
+                    slot_item = self.sessions.slots[slot]
+                    if not iterm_sid:
+                        iterm_sid = str(slot_item.get("iterm_session_id") or "")
+                    if not tty:
+                        tty = str(slot_item.get("tty") or "")
 
                 if app_name == "iTerm":
+                    tty_clean = tty.strip()
+                    tty_path = f"/dev/{tty_clean}" if tty_clean and not tty_clean.startswith("/dev/") else tty_clean
                     script = f"""
                     tell application "iTerm"
                         activate
                         repeat with w in windows
                             repeat with t in tabs of w
                                 repeat with s in sessions of t
+                                    set matched to false
                                     if "{iterm_sid}" is not "" and (unique ID of s is "{iterm_sid}" or unique ID of s contains "{iterm_sid}") then
+                                        set matched to true
+                                    else if "{tty_clean}" is not "" and (tty of s is "{tty_path}" or tty of s is "{tty_clean}") then
+                                        set matched to true
+                                    end if
+                                    if matched then
                                         tell s to select
                                         tell t to select
                                         tell application "System Events"

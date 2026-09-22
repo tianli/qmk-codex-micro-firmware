@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 import sys
 from typing import Any
 
@@ -542,6 +543,21 @@ def main() -> int:
     elif "wezterm" in term_prog:
         terminal_app = "WezTerm"
 
+    tty = ""
+    if ppid and ppid > 0 and sys.platform.startswith("darwin"):
+        try:
+            res = subprocess.run(
+                ["ps", "-p", str(ppid), "-o", "tty="],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+            t = res.stdout.strip()
+            if t and t not in {"??", "-"}:
+                tty = t
+        except Exception:
+            pass
+
     message = {
         "kind": "jetski_status",
         "provider": "antigravity",
@@ -555,6 +571,7 @@ def main() -> int:
         "workspace": workspace_name,
         "terminal_app": terminal_app,
         "iterm_session_id": iterm_session_id,
+        "tty": tty,
     }
 
     try:

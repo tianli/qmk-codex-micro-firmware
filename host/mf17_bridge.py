@@ -265,9 +265,17 @@ class Bridge:
 
         if jetski_brain.exists() and jetski_brain.is_dir():
             try:
+                def _transcript_mtime(p: Path) -> float:
+                    t = p / ".system_generated" / "logs" / "transcript.jsonl"
+                    try:
+                        return t.stat().st_mtime if t.exists() and t.stat().st_size > 0 else 0.0
+                    except OSError:
+                        return 0.0
+
+                valid_dirs = [p for p in jetski_brain.iterdir() if p.is_dir() and UUID_PATTERN.match(p.name)]
                 subdirs = sorted(
-                    [p for p in jetski_brain.iterdir() if p.is_dir() and UUID_PATTERN.match(p.name)],
-                    key=lambda p: p.stat().st_mtime,
+                    valid_dirs,
+                    key=_transcript_mtime,
                     reverse=True,
                 )
                 for d in subdirs[:AGENT_SLOT_COUNT]:
@@ -468,6 +476,7 @@ class Bridge:
         workspace = str(payload.get("workspace") or "")
         terminal_app = payload.get("terminal_app")
         iterm_session_id = payload.get("iterm_session_id")
+        tty = payload.get("tty")
         slot = self.sessions.update(
             session_id,
             status,
@@ -479,6 +488,7 @@ class Bridge:
             workspace=workspace,
             terminal_app=str(terminal_app) if terminal_app else None,
             iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
+            tty=str(tty) if tty else None,
         )
         if slot is not None:
             eff_status = "off" if payload.get("remove") else status
@@ -550,8 +560,8 @@ class Bridge:
             session_id = self.sessions.session_for_slot(slot)
             provider = self.sessions.provider_for_slot(slot)
             self.send_report([MSG_SET_SELECTED, slot])
-            self.controller.open_thread(session_id, slot=slot, provider=provider)
             if session_id:
+                self.controller.open_thread(session_id, slot=slot, provider=provider)
                 self.log(
                     f"selected task key={NUMERIC_KEY_BY_SLOT[slot]} "
                     f"provider={provider} session={session_id}"

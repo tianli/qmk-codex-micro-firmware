@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from host.mf17_bridge import (
     Bridge,
@@ -34,6 +35,7 @@ from host.mf17_bridge import (
     latest_transcript_state,
     visible_codex_session_ids,
 )
+from host.os_automation import OSController
 from host.lighting_api import LEGACY_LED_BY_KEY, resolve_key
 
 
@@ -527,7 +529,82 @@ class WindowsPageKeyInjectionTests(unittest.TestCase):
         self.assertEqual(bridge.sessions.slots[slot]["status"], "thinking")
         self.assertEqual(bridge.sessions.slots[slot]["provider"], "antigravity")
 
+    def test_empty_slot_does_not_open_thread(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True)
+        opened = []
+        bridge.controller.open_thread = lambda *args, **kwargs: opened.append((args, kwargs))
+        # Slot 0 is empty
+        bridge.perform_action(1)  # agent_1
+        self.assertEqual(opened, [])
+
+    def test_open_thread_none_returns_immediately(self):
+        controller = OSController(SessionSlots())
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            controller.open_thread(None, slot=0)
+            mock_run.assert_not_called()
+
+    def test_open_thread_terminal_app_focuses_iterm_with_tty(self):
+        slots = SessionSlots()
+        slots.update(
+            "test-session",
+            "thinking",
+            from_hook=True,
+            terminal_app="iTerm",
+            iterm_session_id="SID123",
+            tty="ttys005",
+        )
+        controller = OSController(slots)
+        controller.is_mac = True
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            controller.open_thread("test-session", slot=0)
+            self.assertTrue(mock_run.called)
+            cmd = mock_run.call_args[0][0]
+            script = cmd[cmd.index("-e") + 1]
+            self.assertIn("SID123", script)
+            self.assertIn("ttys005", script)
+            self.assertIn('tell application "iTerm"', script)
+            self.assertNotIn("com.google.jetski", script)
+
+    def test_session_slots_stores_and_preserves_tty(self):
+        slots = SessionSlots()
+        slots.update("test-sess", "thinking", tty="ttys002", terminal_app="iTerm", iterm_session_id="UUID-1")
+        self.assertEqual(slots.slots[0]["tty"], "ttys002")
+        self.assertEqual(slots.slots[0]["terminal_app"], "iTerm")
+        self.assertEqual(slots.slots[0]["iterm_session_id"], "UUID-1")
+        # Update status without passing tty should preserve previous tty
+        slots.update("test-sess", "complete")
+        self.assertEqual(slots.slots[0]["tty"], "ttys002")
+        self.assertEqual(slots.slots[0]["terminal_app"], "iTerm")
+
+    def test_find_recent_sessions_sorts_by_transcript_mtime(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain_dir = Path(tmpdir) / "brain"
+            brain_dir.mkdir()
+            # Session A created earlier, transcript updated LATER
+            sess_a = brain_dir / "11111111-1111-1111-1111-111111111111"
+            sess_a_log = sess_a / ".system_generated" / "logs"
+            sess_a_log.mkdir(parents=True)
+            t_a = sess_a_log / "transcript.jsonl"
+            t_a.write_text('{"step":1}\n', encoding="utf-8")
+
+            # Session B created later, transcript updated EARLIER
+            sess_b = brain_dir / "22222222-2222-2222-2222-222222222222"
+            sess_b_log = sess_b / ".system_generated" / "logs"
+            sess_b_log.mkdir(parents=True)
+            t_b = sess_b_log / "transcript.jsonl"
+            t_b.write_text('{"step":1}\n', encoding="utf-8")
+
+            os.utime(t_b, (1000, 1000))
+            os.utime(t_a, (2000, 2000))
+
+            with unittest.mock.patch.dict(os.environ, {"JETSKI_APP_DATA_DIR": tmpdir}):
+                recent = bridge.find_recent_sessions()
+                self.assertEqual(recent[0][0], "11111111-1111-1111-1111-111111111111")
+                self.assertEqual(recent[1][0], "22222222-2222-2222-2222-222222222222")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
