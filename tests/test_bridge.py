@@ -213,6 +213,19 @@ class SessionSlotTests(unittest.TestCase):
         self.assertEqual(slots.reconcile_terminal("session_working", "complete"), 0)
         self.assertEqual(slots.slots[0]["status"], "complete")
 
+    def test_terminal_reconciliation_hook_cooldown(self):
+        slots = SessionSlots()
+        slots.update("session_working", "thinking", from_hook=True)
+        # Recent hook event (3 seconds ago < 10.0s cooldown) suppresses heuristic reconciliation
+        slots.slots[0]["last_hook_time"] = time.time() - 3.0
+        self.assertIsNone(slots.reconcile_terminal("session_working", "waiting"))
+        self.assertEqual(slots.slots[0]["status"], "thinking")
+
+        # After cooldown (> 10s), waiting signal from disk is allowed through
+        slots.slots[0]["last_hook_time"] = time.time() - 12.0
+        self.assertEqual(slots.reconcile_terminal("session_working", "waiting"), 0)
+        self.assertEqual(slots.slots[0]["status"], "waiting")
+
 
 class LightingProtocolTests(unittest.TestCase):
     def setUp(self):

@@ -15,13 +15,27 @@ import sys
 from typing import Any
 
 try:
+    from host.status_common import (
+        DEFAULT_STATUS_HOST as HOST,
+        DEFAULT_STATUS_PORT as PORT,
+        PROVIDER_CODEX,
+    )
+except ModuleNotFoundError:
+    try:
+        from status_common import (  # type: ignore[no-redef]
+            DEFAULT_STATUS_HOST as HOST,
+            DEFAULT_STATUS_PORT as PORT,
+            PROVIDER_CODEX,
+        )
+    except ModuleNotFoundError:
+        HOST = "127.0.0.1"
+        PORT = 41717
+        PROVIDER_CODEX = "codex"
+
+try:
     from host.jetski_status_hook import event_to_status
 except ModuleNotFoundError:  # Support execution with this directory on sys.path.
     from jetski_status_hook import event_to_status  # type: ignore[no-redef]
-
-
-HOST = "127.0.0.1"
-PORT = 41717
 
 
 def status_message(event: dict[str, Any], explicit_event: str | None = None) -> dict[str, Any]:
@@ -36,7 +50,7 @@ def status_message(event: dict[str, Any], explicit_event: str | None = None) -> 
     transcript_path = str(event.get("transcript_path") or event.get("transcriptPath") or "")
     return {
         "kind": "codex_status",
-        "provider": "codex",
+        "provider": PROVIDER_CODEX,
         "session_id": session_id,
         "status": status,
         "remove": remove,

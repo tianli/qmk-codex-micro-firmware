@@ -4,65 +4,186 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import socket
 import sys
 from typing import Any
 
+try:
+    from host.status_common import (
+        DEFAULT_STATUS_HOST as HOST,
+        DEFAULT_STATUS_PORT as PORT,
+        PERMISSION_REQUIRED_TOOLS,
+        PERMISSION_TOOL_NAMES,
+        PROVIDER_ANTIGRAVITY,
+        USER_PROMPT_PATTERNS,
+        WAITING_NAME_MARKERS,
+        WAITING_REASON_MARKERS,
+        base_tool_name as _base_tool_name,
+        is_interactive_tool as _is_interactive_tool,
+        is_permission_tool as _is_permission_tool,
+        looks_like_user_prompt as _looks_like_user_prompt,
+        normalize_task_id as _normalize_task_id,
+        scan_transcript_background_tasks,
+    )
+except ModuleNotFoundError:
+    try:
+        from status_common import (  # type: ignore[no-redef]
+            DEFAULT_STATUS_HOST as HOST,
+            DEFAULT_STATUS_PORT as PORT,
+            PERMISSION_REQUIRED_TOOLS,
+            PERMISSION_TOOL_NAMES,
+            PROVIDER_ANTIGRAVITY,
+            USER_PROMPT_PATTERNS,
+            WAITING_NAME_MARKERS,
+            WAITING_REASON_MARKERS,
+            base_tool_name as _base_tool_name,
+            is_interactive_tool as _is_interactive_tool,
+            is_permission_tool as _is_permission_tool,
+            looks_like_user_prompt as _looks_like_user_prompt,
+            normalize_task_id as _normalize_task_id,
+            scan_transcript_background_tasks,
+        )
+    except ModuleNotFoundError:
+        # Standalone deployment fallback (e.g. single file scp to remote Cloudtop)
+        HOST = "127.0.0.1"
+        PORT = 41717
+        PROVIDER_ANTIGRAVITY = "antigravity"
 
-HOST = "127.0.0.1"
-PORT = 41717
+        PERMISSION_TOOL_NAMES = {
+            "ask_question",
+            "ask_custom_permission",
+            "ask_user",
+            "request_user_input",
+            "functions__request_user_input",
+            "requestuserinput",
+            "user_input",
+            "userinput",
+            "elicitation",
+            "confirm",
+            "confirmation",
+            "permission",
+        }
 
-# Tools that prompt the user for interactive input, questions, or explicit permission
-PERMISSION_TOOL_NAMES = {
-    "ask_question",
-    "ask_custom_permission",
-    "ask_user",
-    "request_user_input",
-    "functions__request_user_input",
-    "requestuserinput",
-    "user_input",
-    "userinput",
-    "elicitation",
-    "confirm",
-    "confirmation",
-    "permission",
-}
+        WAITING_NAME_MARKERS = (
+            "ask",
+            "question",
+            "permission",
+            "approval",
+            "confirm",
+            "elicitation",
+            "user_input",
+            "userinput",
+            "awaiting_input",
+            "needs_input",
+        )
+        WAITING_REASON_MARKERS = (
+            "awaiting",
+            "waiting",
+            "user_input",
+            "user input",
+            "needs_input",
+            "needs input",
+            "question",
+            "permission",
+            "approval",
+            "elicitation",
+        )
 
-WAITING_NAME_MARKERS = (
-    "ask",
-    "question",
-    "permission",
-    "approval",
-    "confirm",
-    "elicitation",
-    "user_input",
-    "userinput",
-    "awaiting_input",
-    "needs_input",
-)
-WAITING_REASON_MARKERS = (
-    "awaiting",
-    "waiting",
-    "user_input",
-    "user input",
-    "needs_input",
-    "needs input",
-    "question",
-    "permission",
-    "approval",
-    "elicitation",
-)
+        USER_PROMPT_PATTERNS = (
+            r"\b(?:should\s+i|would\s+you\s+like|do\s+you\s+want|shall\s+i)\b",
+            r"\b(?:which\s+(?:one|option|approach|path|file|directory)\s+would\s+you)\b",
+            r"\b(?:please\s+(?:let\s+me\s+know|confirm|choose|specify|clarify|reply|provide|select))\b",
+            r"\b(?:let\s+me\s+know\s+(?:which|what|if\s+you\s+would\s+like|how\s+you\s+would\s+like))\b",
+            r"\b(?:i\s+need|waiting\s+for|waiting\s+on)\b.{0,60}\b(?:input|answer|choice|selection|details|response)\b",
+        )
 
-# Narrow patterns for detecting when the assistant explicitly asks the user to choose or respond
-USER_PROMPT_PATTERNS = (
-    r"\b(?:should\s+i|would\s+you\s+like|do\s+you\s+want|shall\s+i)\b",
-    r"\b(?:which\s+(?:one|option|approach|path|file|directory)\s+would\s+you)\b",
-    r"\b(?:please\s+(?:let\s+me\s+know|confirm|choose|specify|clarify|reply|provide|select))\b",
-    r"\b(?:let\s+me\s+know\s+(?:which|what|if\s+you\s+would\s+like|how\s+you\s+would\s+like))\b",
-    r"\b(?:i\s+need|waiting\s+for|waiting\s+on)\b.{0,60}\b(?:input|answer|choice|selection|details|response)\b",
-)
+        PERMISSION_REQUIRED_TOOLS = {
+            "run_command",
+            "write_to_file",
+            "replace_file_content",
+            "notebook_edit",
+            "ask_custom_permission",
+        }
+
+        def _looks_like_user_prompt(message: Any) -> bool:
+            if not isinstance(message, str):
+                return False
+            clean_text = re.sub(r"```[\s\S]*?```", " ", message)
+            clean_text = re.sub(r"`[^`\n]*?`", " ", clean_text)
+            clean_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean_text)
+            text = " ".join(clean_text.strip().split())
+            if not text:
+                return False
+            if text.rstrip(" *_\t\n\r.)").endswith("?"):
+                return True
+            tail = text[-500:]
+            return any(
+                re.search(pattern, tail, flags=re.IGNORECASE)
+                for pattern in USER_PROMPT_PATTERNS
+            )
+
+        def _normalize_task_id(tid: str) -> str:
+            return tid.strip("\"'").split("/")[-1]
+
+        def _base_tool_name(tool_name: str) -> str:
+            parts = [part for part in re.split(r"[^a-z0-9_]+", tool_name.lower()) if part]
+            name = parts[-1] if parts else ""
+            if "__" in name:
+                name = name.rsplit("__", 1)[-1]
+            return name
+
+        def _is_interactive_tool(tool_name: str) -> bool:
+            base_tool = _base_tool_name(tool_name)
+            compact = base_tool.replace("_", "")
+            return (
+                base_tool in PERMISSION_TOOL_NAMES
+                or compact in PERMISSION_TOOL_NAMES
+                or any(marker in base_tool for marker in WAITING_NAME_MARKERS)
+            )
+
+        def _is_permission_tool(tool_name: str) -> bool:
+            base_tool = _base_tool_name(tool_name)
+            compact = base_tool.replace("_", "")
+            return (
+                base_tool in PERMISSION_REQUIRED_TOOLS
+                or compact in PERMISSION_REQUIRED_TOOLS
+                or _is_interactive_tool(tool_name)
+            )
+
+        def scan_transcript_background_tasks(lines: list[bytes | str]) -> tuple[set[str], set[str]]:
+            completed_tasks: set[str] = set()
+            running_tasks: set[str] = set()
+            for raw_line in reversed(lines):
+                if isinstance(raw_line, bytes):
+                    try:
+                        line_str = raw_line.decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+                else:
+                    line_str = raw_line
+                try:
+                    rec = json.loads(line_str)
+                except Exception:
+                    continue
+                content = str(rec.get("content") or "")
+                for m in re.finditer(
+                    r"Task(?:\s+id)?\s+[\"']?([\w\-/]+)[\"']?\s+(?:was\s+)?(?:finished|completed|failed|killed|timed\s*out|terminated|canceled|cancelled)",
+                    content,
+                    re.IGNORECASE,
+                ):
+                    completed_tasks.add(_normalize_task_id(m.group(1)))
+                if rec.get("status") == "RUNNING" and rec.get("type") in {"GENERIC", "TOOL_USE", "TOOL_CALL"}:
+                    m = re.search(r"task id:\s*[\"']?([\w\-/]+)", content, re.IGNORECASE)
+                    if m:
+                        task_id = _normalize_task_id(m.group(1))
+                        if task_id not in completed_tasks:
+                            running_tasks.add(task_id)
+                    elif "running as a background task" in content.lower():
+                        running_tasks.add("generic_running_task")
+            return completed_tasks, running_tasks
 
 
 def _event_name(event: dict[str, Any], explicit_event: str | None = None) -> str:
@@ -103,45 +224,6 @@ def _tool_name(event: dict[str, Any]) -> str:
     return ""
 
 
-def _base_tool_name(tool_name: str) -> str:
-    # Handle names such as functions__request_user_input,
-    # functions.request_user_input, and mcp/request_user_input.
-    parts = [part for part in re.split(r"[^a-z0-9_]+", tool_name.lower()) if part]
-    name = parts[-1] if parts else ""
-    if "__" in name:
-        name = name.rsplit("__", 1)[-1]
-    return name
-
-
-PERMISSION_REQUIRED_TOOLS = {
-    "run_command",
-    "write_to_file",
-    "replace_file_content",
-    "notebook_edit",
-    "ask_custom_permission",
-}
-
-
-def _is_interactive_tool(tool_name: str) -> bool:
-    base_tool = _base_tool_name(tool_name)
-    compact = base_tool.replace("_", "")
-    return (
-        base_tool in PERMISSION_TOOL_NAMES
-        or compact in PERMISSION_TOOL_NAMES
-        or any(marker in base_tool for marker in WAITING_NAME_MARKERS)
-    )
-
-
-def _is_permission_tool(tool_name: str) -> bool:
-    base_tool = _base_tool_name(tool_name)
-    compact = base_tool.replace("_", "")
-    return (
-        base_tool in PERMISSION_REQUIRED_TOOLS
-        or compact in PERMISSION_REQUIRED_TOOLS
-        or _is_interactive_tool(tool_name)
-    )
-
-
 def _contains_waiting_signal(value: Any) -> bool:
     if isinstance(value, dict):
         explicit_keys = (
@@ -157,7 +239,7 @@ def _contains_waiting_signal(value: Any) -> bool:
                 return True
         # Only inspect human-readable status/reason fields. Scanning every
         # message string would misclassify a normal completed turn whose text
-        # happens to contain words like “question” or “user input”.
+        # happens to contain words like "question" or "user input".
         for key in ("status", "state", "reason", "terminationReason", "termination_reason", "stop_reason", "stopReason"):
             candidate = value.get(key)
             if isinstance(candidate, str) and _contains_waiting_signal(candidate):
@@ -169,31 +251,6 @@ def _contains_waiting_signal(value: Any) -> bool:
         normalized = value.lower().replace("-", "_")
         return any(marker in normalized for marker in WAITING_REASON_MARKERS)
     return False
-
-
-def _looks_like_user_prompt(message: Any) -> bool:
-    """Return true for a final assistant message that asks the user to respond."""
-    if not isinstance(message, str):
-        return False
-
-    # Strip code blocks, inline code, and markdown links so that regex/code symbols like '?' don't trigger false positives
-    clean_text = re.sub(r"```[\s\S]*?```", " ", message)
-    clean_text = re.sub(r"`[^`\n]*?`", " ", clean_text)
-    clean_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean_text)
-    text = " ".join(clean_text.strip().split())
-    if not text:
-        return False
-
-    # 1. Does the message conclude with a question mark?
-    if text.rstrip(" *_\t\n\r.)").endswith("?"):
-        return True
-
-    # 2. Check for explicit prompt/instruction phrases in the final block
-    tail = text[-500:]
-    return any(
-        re.search(pattern, tail, flags=re.IGNORECASE)
-        for pattern in USER_PROMPT_PATTERNS
-    )
 
 
 def _termination_reason(event: dict[str, Any]) -> str:
@@ -255,10 +312,6 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
     return ""
 
 
-def _normalize_task_id(tid: str) -> str:
-    return tid.strip("\"'").split("/")[-1]
-
-
 def _has_running_background_tasks(event: dict[str, Any]) -> bool:
     """Return True if background tasks or subagents are still running."""
     # 1. Antigravity protojson explicitly passes fullyIdle: false when background tasks/subagents run
@@ -290,27 +343,7 @@ def _has_running_background_tasks(event: dict[str, Any]) -> bool:
                     f.seek(max(0, size - 256 * 1024))
                     lines = f.readlines()
 
-                completed_tasks: set[str] = set()
-                running_tasks: set[str] = set()
-                for line in reversed(lines):
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-
-                    content = str(rec.get("content") or "")
-                    for m in re.finditer(r"Task(?:\s+id)?\s+[\"']?([\w\-/]+)[\"']?\s+(?:was\s+)?(?:finished|completed|failed|killed|timed\s*out|terminated|canceled|cancelled)", content, re.IGNORECASE):
-                        completed_tasks.add(_normalize_task_id(m.group(1)))
-
-                    if rec.get("status") == "RUNNING" and rec.get("type") in {"GENERIC", "TOOL_USE", "TOOL_CALL"}:
-                        m = re.search(r"task id:\s*[\"']?([\w\-/]+)", content, re.IGNORECASE)
-                        if m:
-                            task_id = _normalize_task_id(m.group(1))
-                            if task_id not in completed_tasks:
-                                running_tasks.add(task_id)
-                        elif "running as a background task" in content.lower():
-                            running_tasks.add("generic_task")
-
+                _, running_tasks = scan_transcript_background_tasks(lines)
                 if running_tasks:
                     return True
         except Exception:
@@ -469,7 +502,6 @@ def main() -> int:
 
     transcript_path = str(payload.get("transcriptPath") or payload.get("transcript_path") or "")
     
-    import os
     ppid = os.getppid()
     is_remote = bool(
         os.environ.get("SSH_CLIENT")
