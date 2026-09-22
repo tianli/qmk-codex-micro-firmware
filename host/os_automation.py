@@ -142,6 +142,8 @@ class OSController:
         self.is_mac = sys.platform == "darwin"
         self.is_win = sys.platform == "win32"
         self.is_linux = sys.platform.startswith("linux")
+        self.previous_window_info: dict[str, Any] | None = None
+        self.last_agent_window: dict[str, Any] | None = None
 
         if self.is_win:
             self._init_windows()
@@ -337,8 +339,226 @@ class OSController:
         desktop_keys = [item.strip() for item in configured.split(",") if item.strip()] if configured else None
         self.shortcut(desktop_keys or keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
 
+    def record_current_window(self) -> None:
+        """Capture the currently focused window/application before switching to an agent."""
+        if self.is_mac:
+            script = """
+            tell application "System Events"
+                set p to first application process whose frontmost is true
+                set pName to name of p
+                set pPid to unix id of p
+                set pBundle to ""
+                try
+                    set pBundle to bundle identifier of p
+                end try
+                set wName to ""
+                try
+                    set wName to name of window 1 of p
+                end try
+                set itermSid to ""
+                if pName is "iTerm2" then
+                    try
+                        tell application "iTerm"
+                            set itermSid to unique ID of current session of current window
+                        end tell
+                    end try
+                end if
+                return pName & "|||" & (pPid as string) & "|||" & pBundle & "|||" & wName & "|||" & itermSid
+            end tell
+            """
+            try:
+                res = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    parts = res.stdout.strip().split("|||")
+                    p_name = parts[0] if len(parts) > 0 else ""
+                    p_bundle = parts[2] if len(parts) > 2 else ""
+                    window_data = {
+                        "platform": "darwin",
+                        "process_name": p_name,
+                        "pid": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
+                        "bundle_id": p_bundle,
+                        "window_name": parts[3] if len(parts) > 3 else "",
+                        "iterm_sid": parts[4] if len(parts) > 4 else "",
+                    }
+                    if (
+                        p_name.lower() in {"electron", "jetski", "com.google.jetski", "codex"}
+                        or p_bundle in {"com.google.jetski", "com.openai.codex"}
+                    ):
+                        self.last_agent_window = window_data
+                        return
+
+                    self.previous_window_info = window_data
+            except Exception:
+                pass
+        elif self.is_win and self.user32:
+            try:
+                hwnd = self.user32.GetForegroundWindow()
+                if hwnd:
+                    self.previous_window_info = {"platform": "win32", "hwnd": hwnd}
+            except Exception:
+                pass
+        elif self.is_linux:
+            try:
+                res = subprocess.run(
+                    ["xdotool", "getactivewindow"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    self.previous_window_info = {"platform": "linux", "win_id": res.stdout.strip()}
+            except Exception:
+                pass
+
+    def restore_previous_window(self) -> bool:
+        """Switch focus back to the previously active working window."""
+        if not self.previous_window_info:
+            if self.is_mac:
+                try:
+                    subprocess.run(
+                        ["osascript", "-e", 'tell application "System Events" to key code 48 using command down'],
+                        capture_output=True,
+                        timeout=0.8,
+                    )
+                    return True
+                except Exception:
+                    return False
+            return False
+
+        if self.is_mac:
+            info = self.previous_window_info
+            pid = info.get("pid")
+            p_name = info.get("process_name")
+            bundle_id = info.get("bundle_id")
+            w_name = info.get("window_name", "")
+            iterm_sid = info.get("iterm_sid", "")
+
+            # If the target was an iTerm2 session
+            if p_name == "iTerm2" and iterm_sid:
+                script = f"""
+                tell application "iTerm"
+                    activate
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if unique ID of s is "{iterm_sid}" or unique ID of s contains "{iterm_sid}" then
+                                    tell s to select
+                                    tell t to select
+                                    tell application "System Events"
+                                        tell process "iTerm2"
+                                            set frontmost to true
+                                            try
+                                                perform action "AXRaise" of (first window whose name is (name of w))
+                                            end try
+                                        end tell
+                                    end tell
+                                    return
+                                end if
+                            end repeat
+                        end repeat
+                    end repeat
+                end tell
+                """
+                try:
+                    res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
+                    if res.returncode == 0:
+                        return True
+                except Exception:
+                    pass
+
+            escaped_w = w_name.replace('\\', '\\\\').replace('"', '\\"') if w_name else ""
+            escaped_p = p_name.replace('\\', '\\\\').replace('"', '\\"') if p_name else ""
+
+            script_lines = ['tell application "System Events"']
+            script_lines.append('  set targetProc to missing value')
+            if pid:
+                script_lines.append(f'  repeat with p in (every application process whose unix id is {pid})')
+                script_lines.append('    set targetProc to p')
+                script_lines.append('    exit repeat')
+                script_lines.append('  end repeat')
+            if bundle_id:
+                script_lines.append('  if targetProc is missing value then')
+                script_lines.append(f'    repeat with p in (every application process whose bundle identifier is "{bundle_id}")')
+                script_lines.append('      set targetProc to p')
+                script_lines.append('      exit repeat')
+                script_lines.append('    end repeat')
+                script_lines.append('  end if')
+            if p_name:
+                script_lines.append('  if targetProc is missing value then')
+                script_lines.append(f'    repeat with p in (every application process whose name is "{escaped_p}")')
+                script_lines.append('      set targetProc to p')
+                script_lines.append('      exit repeat')
+                script_lines.append('    end repeat')
+                script_lines.append('  end if')
+
+            script_lines.append('  if targetProc is not missing value then')
+            script_lines.append('    set frontmost of targetProc to true')
+            if escaped_w:
+                script_lines.append('    try')
+                script_lines.append(f'      tell targetProc to perform action "AXRaise" of (first window whose name is "{escaped_w}")')
+                script_lines.append('    on error')
+                script_lines.append('      try')
+                script_lines.append('        tell targetProc to perform action "AXRaise" of window 1')
+                script_lines.append('      end try')
+                script_lines.append('    end try')
+            else:
+                script_lines.append('    try')
+                script_lines.append('      tell targetProc to perform action "AXRaise" of window 1')
+                script_lines.append('    end try')
+            script_lines.append('  end if')
+            script_lines.append('end tell')
+
+            script = "\n".join(script_lines)
+            try:
+                res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+
+            # Fallback activate
+            if bundle_id:
+                try:
+                    subprocess.run(["osascript", "-e", f'tell application id "{bundle_id}" to activate'], capture_output=True, timeout=1.0)
+                    return True
+                except Exception:
+                    pass
+            elif p_name:
+                try:
+                    subprocess.run(["osascript", "-e", f'tell application "{escaped_p}" to activate'], capture_output=True, timeout=1.0)
+                    return True
+                except Exception:
+                    pass
+            return False
+
+        elif self.is_win and self.user32:
+            hwnd = self.previous_window_info.get("hwnd")
+            if hwnd:
+                try:
+                    self.user32.SetForegroundWindow(hwnd)
+                    return True
+                except Exception:
+                    return False
+
+        elif self.is_linux:
+            win_id = self.previous_window_info.get("win_id")
+            if win_id:
+                try:
+                    subprocess.run(["xdotool", "windowactivate", win_id], capture_output=True, timeout=1.0)
+                    return True
+                except Exception:
+                    return False
+
+        return False
+
     def open_thread(self, session_id: str | None, slot: int = 0, provider: str = PROVIDER_ANTIGRAVITY) -> None:
         """Activate Codex or Antigravity and focus the selected conversation."""
+        self.record_current_window()
         provider = normalize_provider(provider)
         uri = conversation_uri(session_id, provider) if session_id else None
         workspace_name = ""

@@ -11,7 +11,7 @@
   "agent_0": { "type": "agent", "slot": 9 },
   "approve": { "type": "shortcut", "keys": ["ENTER"], "focus": false },
   "reject": { "type": "shortcut", "keys": ["ESC"], "focus": false },
-  "up": { "type": "context_scroll", "direction": "up" },
+  "up": { "type": "previous_window" },
   "down": { "type": "context_scroll", "direction": "down" },
   "legacy_right": { "type": "shortcut", "keys": ["CTRL", "]"], "focus": false },
   "legacy_left": { "type": "shortcut", "keys": ["CTRL", "["], "focus": false },

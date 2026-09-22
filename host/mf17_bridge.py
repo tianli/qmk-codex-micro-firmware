@@ -558,8 +558,15 @@ class Bridge:
                 )
             else:
                 self.log(f"task key={NUMERIC_KEY_BY_SLOT[slot]} is empty")
+        elif kind in {"previous_window", "switch_back"}:
+            self.controller.restore_previous_window()
+            self.log("switched back to previous window")
         elif kind == "shortcut":
             self.controller.shortcut(list(action["keys"]), focus=bool(action.get("focus", False)))
+            if action.get("switch_back") or action.get("restore_previous_window"):
+                time.sleep(0.05)
+                self.controller.restore_previous_window()
+                self.log("switched back to previous window after shortcut")
         elif kind == "context_scroll":
             self.controller.context_scroll(str(action.get("direction", "up")))
         elif kind == "new_chat":

@@ -313,6 +313,7 @@ class ActionTests(unittest.TestCase):
         self.scrolls = []
         self.new_chats = 0
         self.microphones = []
+        self.restored_windows = 0
         self.bridge.controller.shortcut = lambda keys, focus=False: self.shortcuts.append((keys, focus))
         self.bridge.controller.slash = lambda command, focus=False: self.slashes.append((command, focus))
         self.bridge.controller.palette = self.palettes.append
@@ -320,6 +321,9 @@ class ActionTests(unittest.TestCase):
         self.bridge.controller.new_chat = lambda: setattr(self, "new_chats", self.new_chats + 1)
         self.bridge.controller.microphone = lambda keys=None, terminal_keys=None: self.microphones.append(
             (keys, terminal_keys)
+        )
+        self.bridge.controller.restore_previous_window = lambda: setattr(
+            self, "restored_windows", self.restored_windows + 1
         )
 
     def test_agent_action_routes_codex_provider(self):
@@ -361,21 +365,33 @@ class ActionTests(unittest.TestCase):
 
     def test_legacy_firmware_uses_six_agent_joystick_action_table(self):
         self.bridge.action_protocol_version = 1
-        self.bridge.perform_action(7)
-        self.bridge.perform_action(9)
-        self.bridge.perform_action(13)
-        self.bridge.perform_action(15)
-        self.assertEqual(self.scrolls, ["up", "down"])
+        self.bridge.perform_action(7)   # up -> previous_window
+        self.bridge.perform_action(9)   # down -> scroll down
+        self.bridge.perform_action(13)  # legacy approve -> ENTER
+        self.bridge.perform_action(15)  # legacy new_chat
+        self.assertEqual(self.restored_windows, 1)
+        self.assertEqual(self.scrolls, ["down"])
         self.assertEqual(self.shortcuts, [(["ENTER"], False)])
         self.assertEqual(self.new_chats, 1)
 
     def test_top_row_controls(self):
         self.bridge.perform_action(11)  # Approve
         self.bridge.perform_action(12)  # Reject
-        self.bridge.perform_action(13)  # Scroll up
-        self.bridge.perform_action(14)  # Scroll down
+        self.bridge.perform_action(13)  # Left arrow (previous_window)
+        self.bridge.perform_action(14)  # Right arrow (Scroll down)
         self.assertEqual(self.shortcuts, [(["ENTER"], False), (["ESC"], False)])
-        self.assertEqual(self.scrolls, ["up", "down"])
+        self.assertEqual(self.restored_windows, 1)
+        self.assertEqual(self.scrolls, ["down"])
+
+    def test_previous_window_action(self):
+        self.bridge.perform_action(13)
+        self.assertEqual(self.restored_windows, 1)
+
+    def test_shortcut_with_switch_back(self):
+        self.bridge.actions["approve"] = {"type": "shortcut", "keys": ["ENTER"], "switch_back": True}
+        self.bridge.perform_action(11)
+        self.assertEqual(self.shortcuts, [(["ENTER"], False)])
+        self.assertEqual(self.restored_windows, 1)
 
     def test_new_chat_and_dictation(self):
         self.bridge.perform_action(15)  # New Chat (+)
