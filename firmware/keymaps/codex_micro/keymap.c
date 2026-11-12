@@ -140,6 +140,8 @@ void keyboard_post_init_user(void) {
      * stale RGB Matrix EEPROM state and of the advanced-indicator callback.
      */
     rgb_matrix_disable_noeeprom();
+    rgb_matrix_set_color_all(0, 0, 0);
+    rgb_matrix_update_pwm_buffers();
     lighting_dirty = true;
 }
 
@@ -399,7 +401,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
 static rgb_t status_color(uint8_t status) {
     switch (status) {
-        case STATUS_IDLE:     return (rgb_t){255, 255, 255};
+        case STATUS_IDLE:     return (rgb_t){0, 0, 0};
         case STATUS_THINKING: return (rgb_t){48, 79, 254};
         case STATUS_COMPLETE: return (rgb_t){0, 255, 0};
         case STATUS_WAITING:  return (rgb_t){255, 109, 0};
@@ -500,7 +502,8 @@ void housekeeping_task_user(void) {
     }
 
     bool animated = recovery_chord_active || selected_agent != 0xFF || key_feedback_mask != 0;
-    if ((!lighting_dirty && !animated) || timer_elapsed32(lighting_render_timer) < 16) {
+    uint32_t interval = (lighting_dirty || animated) ? 16 : 250;
+    if (timer_elapsed32(lighting_render_timer) < interval) {
         return;
     }
 

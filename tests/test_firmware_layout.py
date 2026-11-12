@@ -53,7 +53,7 @@ class FirmwareLayoutTests(unittest.TestCase):
     def test_status_colors_match_codex_micro(self):
         source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
         expected = {
-            "STATUS_IDLE": (255, 255, 255),
+            "STATUS_IDLE": (0, 0, 0),
             "STATUS_THINKING": (48, 79, 254),
             "STATUS_COMPLETE": (0, 255, 0),
             "STATUS_WAITING": (255, 109, 0),
