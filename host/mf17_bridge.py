@@ -205,11 +205,11 @@ LEGACY_ACTION_NAMES = {
 CONTROL_KEY_GLOW: tuple[tuple[int, tuple[int, int, int]], ...] = (
     (13, (0, 28, 10)),   # Approve (num_lock): dim emerald
     (14, (32, 0, 0)),    # Reject (divide): dim red
-    (15, (0, 18, 32)),   # Up / Prev Window (multiply): dim ice-cyan
-    (16, (0, 18, 32)),   # Down / Scroll (minus): dim ice-cyan
-    (9,  (16, 0, 32)),   # New Chat (plus): dim cyber-violet
-    (1,  (0, 26, 22)),   # Dictate (decimal): dim teal
-    (2,  (4, 12, 36)),   # Send (enter): dim electric-blue
+    (15, (0, 28, 10)),   # Up / Prev Window (multiply): dim emerald
+    (16, (0, 28, 10)),   # Down / Scroll (minus): dim emerald
+    (9,  (0, 28, 10)),   # New Chat (plus): dim emerald
+    (1,  (0, 28, 10)),   # Dictate (decimal): dim emerald
+    (2,  (0, 28, 10)),   # Send (enter): dim emerald
 )
 
 
