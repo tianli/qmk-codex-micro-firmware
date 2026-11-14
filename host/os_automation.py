@@ -363,7 +363,19 @@ class OSController:
                         end tell
                     end try
                 end if
-                return pName & "|||" & (pPid as string) & "|||" & pBundle & "|||" & wName & "|||" & itermSid
+                set chromeWinId to ""
+                set chromeTabIdx to ""
+                set chromeTabUrl to ""
+                if pName is "Google Chrome" then
+                    try
+                        tell application "Google Chrome"
+                            set chromeWinId to (id of front window as string)
+                            set chromeTabIdx to (active tab index of front window as string)
+                            set chromeTabUrl to URL of active tab of front window
+                        end tell
+                    end try
+                end if
+                return pName & "|||" & (pPid as string) & "|||" & pBundle & "|||" & wName & "|||" & itermSid & "|||" & chromeWinId & "|||" & chromeTabIdx & "|||" & chromeTabUrl
             end tell
             """
             try:
@@ -377,17 +389,30 @@ class OSController:
                     parts = res.stdout.strip().split("|||")
                     p_name = parts[0] if len(parts) > 0 else ""
                     p_bundle = parts[2] if len(parts) > 2 else ""
+                    w_name = parts[3] if len(parts) > 3 else ""
+                    chrome_win_id = parts[5] if len(parts) > 5 else ""
+                    chrome_tab_idx = parts[6] if len(parts) > 6 else ""
+                    chrome_tab_url = parts[7] if len(parts) > 7 else ""
                     window_data = {
                         "platform": "darwin",
                         "process_name": p_name,
                         "pid": int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None,
                         "bundle_id": p_bundle,
-                        "window_name": parts[3] if len(parts) > 3 else "",
+                        "window_name": w_name,
                         "iterm_sid": parts[4] if len(parts) > 4 else "",
+                        "chrome_win_id": chrome_win_id,
+                        "chrome_tab_idx": int(chrome_tab_idx) if chrome_tab_idx.isdigit() else None,
+                        "chrome_tab_url": chrome_tab_url,
                     }
+                    is_cider_chrome = p_name == "Google Chrome" and (
+                        "cider.corp.google.com" in chrome_tab_url.lower()
+                        or "cider-v.corp.google.com" in chrome_tab_url.lower()
+                        or "cider with jetski" in w_name.lower()
+                    )
                     if (
                         p_name.lower() in {"electron", "jetski", "com.google.jetski", "codex"}
                         or p_bundle in {"com.google.jetski", "com.openai.codex"}
+                        or is_cider_chrome
                     ):
                         self.last_agent_window = window_data
                         return
@@ -437,24 +462,152 @@ class OSController:
             bundle_id = info.get("bundle_id")
             w_name = info.get("window_name", "")
             iterm_sid = info.get("iterm_sid", "")
+            chrome_win_id = info.get("chrome_win_id", "")
+            chrome_tab_idx = info.get("chrome_tab_idx")
+
+            # If the target was a Google Chrome tab
+            if p_name == "Google Chrome" and chrome_win_id and chrome_tab_idx:
+                script = f"""
+                tell application "Google Chrome"
+                    repeat with w in windows
+                        if (id of w as string) is "{chrome_win_id}" then
+                            set oldTitle to ""
+                            try
+                                set oldTitle to title of active tab of w
+                            end try
+                            try
+                                if (active tab index of w) is not {int(chrome_tab_idx)} then
+                                    set active tab index of w to {int(chrome_tab_idx)}
+                                end if
+                            end try
+                            try
+                                set index of w to 1
+                            end try
+                            activate
+                            set wTitle to title of active tab of w
+                            set wPrefix to wTitle
+                            if (length of wTitle) > 20 then
+                                set wPrefix to text 1 thru 20 of wTitle
+                            end if
+                            set oldPrefix to oldTitle
+                            if (length of oldTitle) > 20 then
+                                set oldPrefix to text 1 thru 20 of oldTitle
+                            end if
+                            tell application "System Events"
+                                tell process "Google Chrome"
+                                    set raisedWin to false
+                                    set winNames to name of every window
+                                    repeat with wIdx from 1 to count of winNames
+                                        if wTitle is not "" and (item wIdx of winNames) contains wTitle then
+                                            set frontmost to true
+                                            try
+                                                perform action "AXRaise" of window wIdx
+                                                set raisedWin to true
+                                            end try
+                                            exit repeat
+                                        end if
+                                    end repeat
+                                    if not raisedWin then
+                                        try
+                                            set menuNames to name of every menu item of menu "Window" of menu bar 1
+                                            set targetMenuIdx to 0
+                                            repeat with mIdx from 1 to count of menuNames
+                                                set mName to item mIdx of menuNames
+                                                if mName is not missing value then
+                                                    if (wTitle is not "" and (mName is wTitle or mName contains wTitle or wTitle contains mName)) or (wPrefix is not "" and mName contains "…" and mName starts with wPrefix) then
+                                                        set targetMenuIdx to mIdx
+                                                        exit repeat
+                                                    end if
+                                                end if
+                                            end repeat
+                                            if targetMenuIdx is 0 and oldTitle is not "" then
+                                                repeat with mIdx from 1 to count of menuNames
+                                                    set mName to item mIdx of menuNames
+                                                    if mName is not missing value then
+                                                        if mName is oldTitle or (oldPrefix is not "" and mName contains "…" and mName starts with oldPrefix) then
+                                                            set targetMenuIdx to mIdx
+                                                            exit repeat
+                                                        end if
+                                                    end if
+                                                end repeat
+                                            end if
+                                            if targetMenuIdx > 0 then
+                                                try
+                                                    click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                end try
+                                                set frontmost to true
+                                                try
+                                                    click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                end try
+                                            else
+                                                set frontmost to true
+                                            end if
+                                        end try
+                                    end if
+                                end tell
+                            end tell
+                            return
+                        end if
+                    end repeat
+                end tell
+                """
+                try:
+                    res = subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
+                    if res.returncode == 0:
+                        return True
+                except Exception:
+                    pass
 
             # If the target was an iTerm2 session
             if p_name == "iTerm2" and iterm_sid:
                 script = f"""
                 tell application "iTerm"
-                    activate
                     repeat with w in windows
                         repeat with t in tabs of w
                             repeat with s in sessions of t
                                 if unique ID of s is "{iterm_sid}" or unique ID of s contains "{iterm_sid}" then
                                     tell s to select
                                     tell t to select
+                                    try
+                                        tell w to select
+                                    end try
+                                    try
+                                        set index of w to 1
+                                    end try
+                                    activate
+                                    set wTitle to name of w
                                     tell application "System Events"
                                         tell process "iTerm2"
-                                            set frontmost to true
-                                            try
-                                                perform action "AXRaise" of (first window whose name is (name of w))
-                                            end try
+                                            set raisedWin to false
+                                            set winNames to name of every window
+                                            repeat with wIdx from 1 to count of winNames
+                                                if (item wIdx of winNames) is wTitle or (item wIdx of winNames) contains wTitle then
+                                                    set frontmost to true
+                                                    try
+                                                        perform action "AXRaise" of window wIdx
+                                                        set raisedWin to true
+                                                    end try
+                                                    exit repeat
+                                                end if
+                                            end repeat
+                                            if not raisedWin then
+                                                try
+                                                    set menuNames to name of every menu item of menu "Window" of menu bar 1
+                                                    repeat with mIdx from 1 to count of menuNames
+                                                        set mName to item mIdx of menuNames
+                                                        if mName is not missing value and (mName is wTitle or mName starts with wTitle or mName contains wTitle) then
+                                                            try
+                                                                click menu item mIdx of menu "Window" of menu bar 1
+                                                            end try
+                                                            set frontmost to true
+                                                            try
+                                                                click menu item mIdx of menu "Window" of menu bar 1
+                                                            end try
+                                                            exit repeat
+                                                        end if
+                                                    end repeat
+                                                end try
+                                            end if
                                         end tell
                                     end tell
                                     return
@@ -497,16 +650,37 @@ class OSController:
                 script_lines.append('  end if')
 
             script_lines.append('  if targetProc is not missing value then')
-            script_lines.append('    set frontmost of targetProc to true')
             if escaped_w:
+                script_lines.append('    set raisedWin to false')
                 script_lines.append('    try')
                 script_lines.append(f'      tell targetProc to perform action "AXRaise" of (first window whose name is "{escaped_w}")')
-                script_lines.append('    on error')
-                script_lines.append('      try')
-                script_lines.append('        tell targetProc to perform action "AXRaise" of window 1')
-                script_lines.append('      end try')
+                script_lines.append('      set frontmost of targetProc to true')
+                script_lines.append('      set raisedWin to true')
                 script_lines.append('    end try')
+                script_lines.append('    if not raisedWin then')
+                script_lines.append('      try')
+                script_lines.append('        set menuNames to name of every menu item of menu "Window" of menu bar 1 of targetProc')
+                script_lines.append('        repeat with mIdx from 1 to count of menuNames')
+                script_lines.append('          set mName to item mIdx of menuNames')
+                script_lines.append(f'          if mName is not missing value and (mName is "{escaped_w}" or mName contains "{escaped_w}" or "{escaped_w}" contains mName) then')
+                script_lines.append('            try')
+                script_lines.append('              tell targetProc to click menu item mIdx of menu "Window" of menu bar 1')
+                script_lines.append('            end try')
+                script_lines.append('            set frontmost of targetProc to true')
+                script_lines.append('            try')
+                script_lines.append('              tell targetProc to click menu item mIdx of menu "Window" of menu bar 1')
+                script_lines.append('            end try')
+                script_lines.append('            set raisedWin to true')
+                script_lines.append('            exit repeat')
+                script_lines.append('          end if')
+                script_lines.append('        end repeat')
+                script_lines.append('      end try')
+                script_lines.append('    end if')
+                script_lines.append('    if not raisedWin then')
+                script_lines.append('      set frontmost of targetProc to true')
+                script_lines.append('    end if')
             else:
+                script_lines.append('    set frontmost of targetProc to true')
                 script_lines.append('    try')
                 script_lines.append('      tell targetProc to perform action "AXRaise" of window 1')
                 script_lines.append('    end try')
@@ -556,6 +730,284 @@ class OSController:
 
         return False
 
+    def _focus_cider_chrome_tab(self, workspace_name: str, allow_any_cider: bool = False) -> bool:
+        """Find and focus a Cider tab in Google Chrome using fast batch AppleScript property lookup."""
+        if not self.is_mac:
+            return False
+        if not workspace_name and not allow_any_cider:
+            return False
+
+        escaped_ws = workspace_name.replace('\\', '\\\\').replace('"', '\\"')
+        script = f"""
+        tell application "System Events"
+            if not (exists process "Google Chrome") then
+                return "NOT_RUNNING"
+            end if
+        end tell
+        tell application "Google Chrome"
+            set winIDs to id of windows
+            if (count of winIDs) is 0 then
+                return "NO_WINDOWS"
+            end if
+            set tabURLsByWin to URL of tabs of windows
+            set tabTitlesByWin to title of tabs of windows
+            set targetWinId to missing value
+            set targetTabIdx to 0
+
+            if "{escaped_ws}" is not "" then
+                repeat with wIdx from 1 to count of winIDs
+                    set wURLs to item wIdx of tabURLsByWin
+                    repeat with tIdx from 1 to count of wURLs
+                        set u to item tIdx of wURLs
+                        if (u contains "cider.corp.google.com" or u contains "cider-v.corp.google.com") then
+                            if (u ends with "/{escaped_ws}" or u ends with "%2F{escaped_ws}" or u ends with "ws={escaped_ws}" or u contains "/{escaped_ws}&" or u contains "%2F{escaped_ws}&" or u contains "ws={escaped_ws}&" or u contains "/{escaped_ws}#" or u contains "%2F{escaped_ws}#" or u contains "/{escaped_ws}/" or u contains "%2F{escaped_ws}/") then
+                                set targetWinId to item wIdx of winIDs
+                                set targetTabIdx to tIdx
+                                exit repeat
+                            end if
+                        end if
+                    end repeat
+                    if targetWinId is not missing value then exit repeat
+                end repeat
+
+                if targetWinId is missing value then
+                    repeat with wIdx from 1 to count of winIDs
+                        set wTitles to item wIdx of tabTitlesByWin
+                        repeat with tIdx from 1 to count of wTitles
+                            set tTitle to item tIdx of wTitles
+                            if tTitle contains "Cider" and (tTitle starts with "{escaped_ws} " or tTitle starts with "{escaped_ws}—") then
+                                set targetWinId to item wIdx of winIDs
+                                set targetTabIdx to tIdx
+                                exit repeat
+                            end if
+                        end repeat
+                        if targetWinId is not missing value then exit repeat
+                    end repeat
+                end if
+            else if {"true" if allow_any_cider else "false"} then
+                repeat with wIdx from 1 to count of winIDs
+                    set wURLs to item wIdx of tabURLsByWin
+                    repeat with tIdx from 1 to count of wURLs
+                        set u to item tIdx of wURLs
+                        if (u contains "cider.corp.google.com" or u contains "cider-v.corp.google.com") then
+                            set targetWinId to item wIdx of winIDs
+                            set targetTabIdx to tIdx
+                            exit repeat
+                        end if
+                    end repeat
+                    if targetWinId is not missing value then exit repeat
+                end repeat
+            end if
+
+            if targetWinId is missing value then
+                return "NOT_FOUND"
+            end if
+
+            set targetWin to first window whose id is targetWinId
+            set oldTitle to ""
+            try
+                set oldTitle to title of active tab of targetWin
+            end try
+            try
+                if (active tab index of targetWin) is not targetTabIdx then
+                    set active tab index of targetWin to targetTabIdx
+                end if
+            end try
+            try
+                set index of targetWin to 1
+            end try
+            activate
+            set activeTitle to title of active tab of targetWin
+            set activePrefix to activeTitle
+            if (length of activeTitle) > 20 then
+                set activePrefix to text 1 thru 20 of activeTitle
+            end if
+            set oldPrefix to oldTitle
+            if (length of oldTitle) > 20 then
+                set oldPrefix to text 1 thru 20 of oldTitle
+            end if
+        end tell
+        tell application "System Events"
+            tell process "Google Chrome"
+                set raisedWin to false
+                set winNames to name of every window
+                repeat with wIdx from 1 to count of winNames
+                    set wName to item wIdx of winNames
+                    if (activeTitle is not "" and wName contains activeTitle) or ("{escaped_ws}" is not "" and wName contains "{escaped_ws}" and wName contains "Cider") then
+                        set frontmost to true
+                        try
+                            perform action "AXRaise" of window wIdx
+                            set raisedWin to true
+                        end try
+                        exit repeat
+                    end if
+                end repeat
+                if not raisedWin then
+                    try
+                        set menuNames to name of every menu item of menu "Window" of menu bar 1
+                        set targetMenuIdx to 0
+                        repeat with mIdx from 1 to count of menuNames
+                            set mName to item mIdx of menuNames
+                            if mName is not missing value then
+                                if (activeTitle is not "" and (mName is activeTitle or mName contains activeTitle or activeTitle contains mName)) or (activePrefix is not "" and mName contains "…" and mName starts with activePrefix) or ("{escaped_ws}" is not "" and mName contains "Cider" and (mName starts with "{escaped_ws} " or mName starts with "{escaped_ws}—")) then
+                                    set targetMenuIdx to mIdx
+                                    exit repeat
+                                end if
+                            end if
+                        end repeat
+                        if targetMenuIdx is 0 and oldTitle is not "" then
+                            repeat with mIdx from 1 to count of menuNames
+                                set mName to item mIdx of menuNames
+                                if mName is not missing value then
+                                    if mName is oldTitle or (oldPrefix is not "" and mName contains "…" and mName starts with oldPrefix) then
+                                        set targetMenuIdx to mIdx
+                                        exit repeat
+                                    end if
+                                end if
+                            end repeat
+                        end if
+                        if targetMenuIdx > 0 then
+                            try
+                                click menu item targetMenuIdx of menu "Window" of menu bar 1
+                            end try
+                            set frontmost to true
+                            try
+                                click menu item targetMenuIdx of menu "Window" of menu bar 1
+                            end try
+                        else
+                            set frontmost to true
+                        end if
+                    end try
+                end if
+            end tell
+        end tell
+        return "FOUND"
+        """
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            return res.returncode == 0 and res.stdout.strip() == "FOUND"
+        except Exception:
+            return False
+
+    def _focus_jetski_desktop_window(self, workspace_name: str, require_workspace_match: bool = False) -> bool:
+        """Focus the Jetski Desktop window matching workspace_name across all macOS Desktops/Spaces."""
+        if not self.is_mac:
+            return False
+        escaped_ws = workspace_name.replace('\\', '\\\\').replace('"', '\\"')
+        require_str = "true" if require_workspace_match else "false"
+        script = f"""
+        tell application "System Events"
+            set matchedWin to false
+            repeat with p in (every process whose name is "Electron" or name is "Jetski" or bundle identifier is "com.google.jetski")
+                set winNames to {{}}
+                try
+                    set winNames to name of every window of p
+                end try
+
+                -- 1. Check windows visible on the current macOS Desktop (Space)
+                if "{escaped_ws}" is not "" then
+                    repeat with wIdx from 1 to count of winNames
+                        if (item wIdx of winNames) contains "{escaped_ws}" then
+                            set frontmost of p to true
+                            try
+                                tell p to perform action "AXRaise" of window wIdx
+                            end try
+                            set matchedWin to true
+                            exit repeat
+                        end if
+                    end repeat
+                end if
+
+                -- 2. Check the Window menu bar item list (includes windows on OTHER macOS Desktops/Spaces)
+                if not matchedWin and "{escaped_ws}" is not "" then
+                    try
+                        set menuNames to name of every menu item of menu "Window" of menu bar 1 of p
+                        repeat with mIdx from 1 to count of menuNames
+                            set mName to item mIdx of menuNames
+                            if mName is not missing value and mName contains "{escaped_ws}" then
+                                try
+                                    tell p to click menu item mIdx of menu "Window" of menu bar 1
+                                end try
+                                set frontmost of p to true
+                                try
+                                    tell application id "com.google.jetski" to activate
+                                end try
+                                try
+                                    tell p to click menu item mIdx of menu "Window" of menu bar 1
+                                end try
+                                set matchedWin to true
+                                exit repeat
+                            end if
+                        end repeat
+                    end try
+                end if
+
+                -- 3. Fallback when workspace match is not required
+                if not matchedWin and not {require_str} then
+                    if (count of winNames) > 0 then
+                        set frontmost of p to true
+                        try
+                            tell p to perform action "AXRaise" of window 1
+                        end try
+                        set matchedWin to true
+                    else
+                        try
+                            set menuNames to name of every menu item of menu "Window" of menu bar 1 of p
+                            set afterArrange to false
+                            repeat with mIdx from 1 to count of menuNames
+                                set mName to item mIdx of menuNames
+                                if mName is not missing value then
+                                    if mName is "Arrange in Front" or mName is "Bring All to Front" or mName is "Bring All To Front" then
+                                        set afterArrange to true
+                                    else if afterArrange then
+                                        try
+                                            tell p to click menu item mIdx of menu "Window" of menu bar 1
+                                        end try
+                                        set frontmost of p to true
+                                        try
+                                            tell application id "com.google.jetski" to activate
+                                        end try
+                                        try
+                                            tell p to click menu item mIdx of menu "Window" of menu bar 1
+                                        end try
+                                        set matchedWin to true
+                                        exit repeat
+                                    end if
+                                end if
+                            end repeat
+                        end try
+                    end if
+                end if
+
+                if matchedWin then
+                    exit repeat
+                end if
+            end repeat
+            if matchedWin then
+                try
+                    tell application id "com.google.jetski" to activate
+                end try
+                return "FOUND"
+            end if
+            return "NOT_FOUND"
+        end tell
+        """
+        try:
+            res = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            return res.returncode == 0 and res.stdout.strip() == "FOUND"
+        except Exception:
+            return False
+
     def open_thread(self, session_id: str | None, slot: int = 0, provider: str = PROVIDER_ANTIGRAVITY) -> None:
         """Activate Codex or Antigravity and focus the selected conversation."""
         if not session_id:
@@ -564,21 +1016,25 @@ class OSController:
         provider = normalize_provider(provider)
         uri = conversation_uri(session_id, provider) if session_id else None
         workspace_name = ""
+        client_app = None
         terminal_app = None
         iterm_sid = ""
         tty = ""
         pid = None
+        is_remote = False
         if 0 <= slot < len(self.sessions.slots) and self.sessions.slots[slot]:
             slot_item = self.sessions.slots[slot]
             workspace_name = str(slot_item.get("workspace") or "")
+            client_app = slot_item.get("client_app")
             terminal_app = slot_item.get("terminal_app")
             iterm_sid = str(slot_item.get("iterm_session_id") or "")
             tty = str(slot_item.get("tty") or "")
             pid = slot_item.get("pid")
+            is_remote = bool(slot_item.get("is_remote", False))
 
         if self.is_mac:
-            # If terminal_app is not set, infer whether this session is running in a terminal emulator
-            if not terminal_app:
+            # If terminal_app is not set, infer whether this local session is running in a terminal emulator
+            if not terminal_app and not is_remote and client_app != "cider":
                 if pid and pid > 0:
                     try:
                         res = subprocess.run(
@@ -593,8 +1049,8 @@ class OSController:
                             terminal_app = "iTerm"
                     except Exception:
                         pass
-                if not terminal_app and provider == PROVIDER_ANTIGRAVITY:
-                    # Check if any CLI jetski process is currently attached to a local tty
+                if not terminal_app and not pid and not workspace_name and not client_app and provider == PROVIDER_ANTIGRAVITY:
+                    # Fallback only when no PID/workspace/client metadata exists for a local session
                     try:
                         res = subprocess.run(
                             ["ps", "-eo", "pid,tty,comm"],
@@ -630,7 +1086,7 @@ class OSController:
                     tty_path = f"/dev/{tty_clean}" if tty_clean and not tty_clean.startswith("/dev/") else tty_clean
                     script = f"""
                     tell application "iTerm"
-                        activate
+                        set targetWin to missing value
                         repeat with w in windows
                             repeat with t in tabs of w
                                 repeat with s in sessions of t
@@ -643,38 +1099,76 @@ class OSController:
                                     if matched then
                                         tell s to select
                                         tell t to select
-                                        tell application "System Events"
-                                            tell process "iTerm2"
-                                                set frontmost to true
-                                                try
-                                                    perform action "AXRaise" of (first window whose name is (name of w))
-                                                end try
-                                            end tell
-                                        end tell
-                                        return
+                                        set targetWin to w
+                                        exit repeat
                                     end if
                                 end repeat
+                                if targetWin is not missing value then exit repeat
                             end repeat
+                            if targetWin is not missing value then exit repeat
                         end repeat
-                        repeat with w in windows
-                            repeat with t in tabs of w
-                                repeat with s in sessions of t
-                                    if name of s contains "jetski" or name of w contains "jetski" then
-                                        tell s to select
-                                        tell t to select
-                                        tell application "System Events"
-                                            tell process "iTerm2"
-                                                set frontmost to true
-                                                try
-                                                    perform action "AXRaise" of (first window whose name is (name of w))
-                                                end try
-                                            end tell
-                                        end tell
-                                        return
-                                    end if
+                        if targetWin is missing value then
+                            repeat with w in windows
+                                repeat with t in tabs of w
+                                    repeat with s in sessions of t
+                                        if name of s contains "jetski" or name of w contains "jetski" then
+                                            tell s to select
+                                            tell t to select
+                                            set targetWin to w
+                                            exit repeat
+                                        end if
+                                    end repeat
+                                    if targetWin is not missing value then exit repeat
                                 end repeat
+                                if targetWin is not missing value then exit repeat
                             end repeat
-                        end repeat
+                        end if
+                        if targetWin is not missing value then
+                            try
+                                tell targetWin to select
+                            end try
+                            try
+                                set index of targetWin to 1
+                            end try
+                            activate
+                            set wTitle to name of targetWin
+                            tell application "System Events"
+                                tell process "iTerm2"
+                                    set raisedWin to false
+                                    set winNames to name of every window
+                                    repeat with wIdx from 1 to count of winNames
+                                        if (item wIdx of winNames) is wTitle or (item wIdx of winNames) contains wTitle then
+                                            set frontmost to true
+                                            try
+                                                perform action "AXRaise" of window wIdx
+                                                set raisedWin to true
+                                            end try
+                                            exit repeat
+                                        end if
+                                    end repeat
+                                    if not raisedWin then
+                                        try
+                                            set menuNames to name of every menu item of menu "Window" of menu bar 1
+                                            repeat with mIdx from 1 to count of menuNames
+                                                set mName to item mIdx of menuNames
+                                                if mName is not missing value and (mName is wTitle or mName starts with wTitle or mName contains wTitle) then
+                                                    try
+                                                        click menu item mIdx of menu "Window" of menu bar 1
+                                                    end try
+                                                    set frontmost to true
+                                                    try
+                                                        click menu item mIdx of menu "Window" of menu bar 1
+                                                    end try
+                                                    exit repeat
+                                                end if
+                                            end repeat
+                                        end try
+                                    end if
+                                end tell
+                            end tell
+                            return
+                        end if
+                        activate
                         tell application "System Events"
                             tell process "iTerm2"
                                 set frontmost to true
@@ -706,43 +1200,32 @@ class OSController:
                 return
 
             if provider == PROVIDER_ANTIGRAVITY:
-                script = f"""
-                try
-                    tell application id "com.google.jetski" to activate
-                end try
-                tell application "System Events"
-                    repeat with p in (every process whose name is "Electron" or name is "Jetski" or bundle identifier is "com.google.jetski")
-                        set frontmost of p to true
-                        set targetWin to missing value
-                        if "{workspace_name}" is not "" then
-                            repeat with w in (every window of p)
-                                if name of w contains "{workspace_name}" then
-                                    set targetWin to w
-                                    exit repeat
-                                end if
-                            end repeat
-                        end if
-                        if targetWin is missing value and (count of windows of p) > 0 then
-                            set targetWin to window 1 of p
-                        end if
-                        if targetWin is not missing value then
-                            try
-                                tell p to perform action "AXRaise" of targetWin
-                            end try
-                        end if
-                    end repeat
-                end tell
-                """
-                try:
-                    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=2.0)
-                except Exception:
-                    pass
+                # 1. Explicit Cider session: focus matching Chrome Cider tab first
+                if client_app == "cider":
+                    if self._focus_cider_chrome_tab(workspace_name, allow_any_cider=not bool(workspace_name)):
+                        return
+
+                # 2. If workspace_name is known, check for an exact Jetski Desktop window match first;
+                #    if no Jetski Desktop window matches that workspace, check if a Chrome Cider tab matches it.
+                if workspace_name:
+                    if self._focus_jetski_desktop_window(workspace_name, require_workspace_match=True):
+                        if uri and not is_remote:
+                            try:
+                                subprocess.run(["open", "-u", uri], capture_output=True, timeout=1.5)
+                            except Exception:
+                                pass
+                        return
+                    if self._focus_cider_chrome_tab(workspace_name):
+                        return
+
+                # 3. Default fallback: focus Jetski Desktop window 1
+                self._focus_jetski_desktop_window(workspace_name, require_workspace_match=False)
             elif provider == PROVIDER_CODEX:
                 try:
                     subprocess.run(["osascript", "-e", 'tell application "Codex" to activate'], capture_output=True, timeout=1.5)
                 except Exception:
                     pass
-            if uri:
+            if uri and not is_remote:
                 try:
                     subprocess.run(["open", "-u", uri], capture_output=True, timeout=1.5)
                 except Exception:

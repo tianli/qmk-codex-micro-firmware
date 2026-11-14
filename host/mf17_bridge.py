@@ -200,6 +200,18 @@ LEGACY_ACTION_NAMES = {
     17: "send",
 }
 
+# Default low-power ambient glow on the 7 outer control keys (using the
+# firmware's base pixel layer so white press-and-fade feedback is preserved).
+CONTROL_KEY_GLOW: tuple[tuple[int, tuple[int, int, int]], ...] = (
+    (13, (0, 28, 10)),   # Approve (num_lock): dim emerald
+    (14, (32, 0, 0)),    # Reject (divide): dim red
+    (15, (0, 18, 32)),   # Up / Prev Window (multiply): dim ice-cyan
+    (16, (0, 18, 32)),   # Down / Scroll (minus): dim ice-cyan
+    (9,  (16, 0, 32)),   # New Chat (plus): dim cyber-violet
+    (1,  (0, 26, 22)),   # Dictate (decimal): dim teal
+    (2,  (4, 12, 36)),   # Send (enter): dim electric-blue
+)
+
 
 class Bridge:
     def __init__(
@@ -413,10 +425,17 @@ class Bridge:
         self.lighting.protocol_version = 1
         self.action_protocol_version = 1
         self.lighting_capabilities = 0
+        self.send_report([MSG_CLEAR_ALL_KEY_RGB, 0])
+        self.apply_control_key_glow()
         self.sync_leds()
         self.send_report([MSG_GET_CAPABILITIES, 0])
         self.send_report([MSG_PING])
         return True
+
+    def apply_control_key_glow(self) -> None:
+        """Set the default low-power ambient glow on the 7 outer control keys."""
+        for pixel, (r, g, b) in CONTROL_KEY_GLOW:
+            self.send_report([MSG_SET_PIXEL, pixel, r, g, b])
 
     def send_report(self, values: list[int]) -> None:
         report = bytes((values + [0] * REPORT_SIZE)[:REPORT_SIZE])
@@ -474,6 +493,7 @@ class Bridge:
             if int(pid) > 100000:
                 is_remote = True
         workspace = str(payload.get("workspace") or "")
+        client_app = payload.get("client_app")
         terminal_app = payload.get("terminal_app")
         iterm_session_id = payload.get("iterm_session_id")
         tty = payload.get("tty")
@@ -486,6 +506,7 @@ class Bridge:
             pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
             is_remote=is_remote,
             workspace=workspace,
+            client_app=str(client_app) if client_app else None,
             terminal_app=str(terminal_app) if terminal_app else None,
             iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
             tty=str(tty) if tty else None,
@@ -496,8 +517,10 @@ class Bridge:
             self.update_slot_lighting(slot, eff_status)
             ev = payload.get("event") or ""
             ev_str = f" event={ev}" if ev else ""
+            ws_str = f" workspace={workspace}" if workspace else ""
+            client_str = f" client={client_app}" if client_app else ""
             self.log(
-                f"status provider={provider} session={session_id} state={status}{ev_str} "
+                f"status provider={provider} session={session_id} state={status}{ev_str}{ws_str}{client_str} "
                 f"key={NUMERIC_KEY_BY_SLOT[slot]}"
             )
 

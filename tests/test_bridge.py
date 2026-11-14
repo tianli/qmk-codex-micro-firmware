@@ -10,6 +10,7 @@ from unittest import mock
 
 from host.mf17_bridge import (
     Bridge,
+    CONTROL_KEY_GLOW,
     active_codex_sessions,
     archived_codex_session_ids,
     CAP_LOGICAL_KEYS,
@@ -275,6 +276,13 @@ class LightingProtocolTests(unittest.TestCase):
         )
         self.assertEqual(self.bridge.lighting.protocol_version, PROTOCOL_VERSION)
         self.assertEqual(self.bridge.action_protocol_version, PROTOCOL_VERSION)
+
+    def test_apply_control_key_glow_sends_base_pixel_colors(self):
+        self.bridge.apply_control_key_glow()
+        self.assertEqual(
+            self.reports,
+            [[MSG_SET_PIXEL, pixel, r, g, b] for pixel, (r, g, b) in CONTROL_KEY_GLOW],
+        )
 
     def test_process_jetski_status_packet(self):
         self.bridge.process_status({
@@ -602,6 +610,137 @@ class WindowsPageKeyInjectionTests(unittest.TestCase):
                 recent = bridge.find_recent_sessions()
                 self.assertEqual(recent[0][0], "11111111-1111-1111-1111-111111111111")
                 self.assertEqual(recent[1][0], "22222222-2222-2222-2222-222222222222")
+
+    def test_open_thread_cider_session_focuses_chrome_tab_without_jetski_uri(self):
+        slots = SessionSlots()
+        slots.update(
+            "87b1b190-4f3f-4ff4-8900-1c7473d309c3",
+            "waiting",
+            from_hook=True,
+            is_remote=True,
+            workspace="cc-perf-control-1",
+            client_app="cider",
+        )
+        controller = OSController(slots)
+        controller.is_mac = True
+        controller.record_current_window = lambda: None
+
+        def fake_run(cmd, **kwargs):
+            res = unittest.mock.MagicMock()
+            res.returncode = 0
+            res.stdout = "FOUND\n"
+            return res
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run) as mock_run:
+            controller.open_thread("87b1b190-4f3f-4ff4-8900-1c7473d309c3", slot=0)
+            self.assertEqual(mock_run.call_count, 1)
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "osascript")
+            script = cmd[cmd.index("-e") + 1]
+            self.assertIn('tell application "Google Chrome"', script)
+            self.assertIn("cc-perf-control-1", script)
+            # Must NOT invoke 'open -u jetski-ide://...' or 'ps -eo'
+            for call in mock_run.call_args_list:
+                called_cmd = call[0][0]
+                self.assertNotEqual(called_cmd[0], "open")
+                self.assertNotEqual(called_cmd[0], "ps")
+
+    def test_open_thread_workspace_falls_back_to_cider_when_no_jetski_window_matches(self):
+        slots = SessionSlots()
+        slots.update(
+            "87b1b190-4f3f-4ff4-8900-1c7473d309c3",
+            "complete",
+            from_hook=True,
+            is_remote=True,
+            workspace="cc-perf-control-1",
+            client_app=None,
+        )
+        controller = OSController(slots)
+        controller.is_mac = True
+        controller.record_current_window = lambda: None
+
+        def fake_run(cmd, **kwargs):
+            res = unittest.mock.MagicMock()
+            res.returncode = 0
+            script = cmd[cmd.index("-e") + 1] if "-e" in cmd else ""
+            if "com.google.jetski" in script:
+                res.stdout = "NOT_FOUND\n"
+            elif 'tell application "Google Chrome"' in script:
+                res.stdout = "FOUND\n"
+            else:
+                res.stdout = ""
+            return res
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run) as mock_run:
+            controller.open_thread("87b1b190-4f3f-4ff4-8900-1c7473d309c3", slot=0)
+            # First call checks Jetski Desktop for workspace match; second call focuses Chrome Cider tab
+            self.assertEqual(mock_run.call_count, 2)
+            for call in mock_run.call_args_list:
+                self.assertNotEqual(call[0][0][0], "open")
+                self.assertNotEqual(call[0][0][0], "ps")
+
+    def test_record_and_restore_chrome_window_tab(self):
+        controller = OSController(SessionSlots())
+        controller.is_mac = True
+
+        # 1. Non-Cider Chrome tab (e.g., Buganizer) should be recorded in previous_window_info
+        buganizer_res = unittest.mock.MagicMock(
+            returncode=0,
+            stdout="Google Chrome|||555|||com.google.Chrome|||Buganizer|||""|||1999084923|||4|||https://b.corp.google.com/issues/123\n",
+        )
+        with unittest.mock.patch("subprocess.run", return_value=buganizer_res):
+            controller.record_current_window()
+
+        self.assertIsNotNone(controller.previous_window_info)
+        self.assertEqual(controller.previous_window_info["chrome_win_id"], "1999084923")
+        self.assertEqual(controller.previous_window_info["chrome_tab_idx"], 4)
+
+        # 2. Switching between Cider tabs should NOT overwrite previous_window_info
+        cider_res = unittest.mock.MagicMock(
+            returncode=0,
+            stdout="Google Chrome|||555|||com.google.Chrome|||cc-perf-control-1 — Cider with Jetski|||""|||1999085337|||1|||https://cider.corp.google.com/?ws=tianliyu%2Fcc-perf-control-1\n",
+        )
+        with unittest.mock.patch("subprocess.run", return_value=cider_res):
+            controller.record_current_window()
+
+        self.assertEqual(controller.previous_window_info["chrome_win_id"], "1999084923")
+        self.assertEqual(controller.previous_window_info["chrome_tab_idx"], 4)
+        self.assertEqual(controller.last_agent_window["chrome_win_id"], "1999085337")
+
+        # 3. Restoring previous window switches back to Chrome window 1999084923 tab 4
+        with unittest.mock.patch("subprocess.run", return_value=unittest.mock.MagicMock(returncode=0)) as mock_restore:
+            self.assertTrue(controller.restore_previous_window())
+            script = mock_restore.call_args[0][0][2]
+            self.assertIn("1999084923", script)
+            self.assertIn("set active tab index of w to 4", script)
+            self.assertIn('menu "Window" of menu bar 1', script)
+
+    def test_cross_space_window_menu_fallback_in_applescripts(self):
+        slots = SessionSlots()
+        slots.update(
+            "528fbc56-02fc-4705-b18a-6ad714ce05d4",
+            "complete",
+            from_hook=True,
+            is_remote=True,
+            workspace="omni-colab",
+            client_app="ide",
+        )
+        controller = OSController(slots)
+        controller.is_mac = True
+        controller.record_current_window = lambda: None
+
+        def fake_run(cmd, **kwargs):
+            res = unittest.mock.MagicMock()
+            res.returncode = 0
+            res.stdout = "FOUND\n"
+            return res
+
+        with unittest.mock.patch("subprocess.run", side_effect=fake_run) as mock_run:
+            controller.open_thread("528fbc56-02fc-4705-b18a-6ad714ce05d4", slot=0)
+            self.assertEqual(mock_run.call_count, 1)
+            script = mock_run.call_args[0][0][2]
+            self.assertIn('menu "Window" of menu bar 1 of p', script)
+            self.assertIn("omni-colab", script)
 
 
 if __name__ == "__main__":

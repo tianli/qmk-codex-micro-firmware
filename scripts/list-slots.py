@@ -95,6 +95,8 @@ def main() -> int:
 
     slot_map: dict[int, str] = {}
     status_map: dict[str, str] = {}
+    workspace_map: dict[str, str] = {}
+    client_map: dict[str, str] = {}
 
     for line in lines[start_idx:]:
         if "loaded numeric task slots:" in line:
@@ -122,6 +124,12 @@ def main() -> int:
             else:
                 slot_map[key_num] = sid
                 status_map[sid] = state
+                m_ws = re.search(r"\bworkspace=([^\s]+)", line)
+                if m_ws:
+                    workspace_map[sid] = m_ws.group(1)
+                m_cl = re.search(r"\bclient=([^\s]+)", line)
+                if m_cl:
+                    client_map[sid] = m_cl.group(1)
 
         # Check reconciled terminal state updates
         match_rec = re.search(r"reconciled session=([0-9a-f-]+) state=(\w+) key=(\d)", line)
@@ -153,6 +161,9 @@ def main() -> int:
         if sid:
             status = status_map.get(sid, "idle")
             workspace = get_conversation_workspace(sid)
+            if workspace == "(active task)" and sid in workspace_map:
+                client_tag = f" ({client_map[sid]})" if sid in client_map else ""
+                workspace = f"Workspace: {workspace_map[sid]}{client_tag}"
             print(f"{key_label:<24} | {status:<10} | {workspace:<48} | {sid}")
         else:
             print(f"{key_label:<24} | {'off':<10} | {'(unassigned)':<48} | -")

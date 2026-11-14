@@ -451,6 +451,74 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     return "idle", False
 
 
+def extract_workspace_name(payload: dict[str, Any], transcript_path: str = "") -> str:
+    """Extract workspace or CitC client name from hook payload or transcript."""
+    workspace_paths = payload.get("workspacePaths") or payload.get("workspace_paths") or []
+    candidates: list[str] = []
+    if isinstance(workspace_paths, list):
+        candidates.extend(str(p) for p in workspace_paths if p)
+    elif isinstance(workspace_paths, str) and workspace_paths.strip():
+        candidates.append(workspace_paths.strip())
+
+    cwd = str(payload.get("cwd") or "").strip()
+    if cwd:
+        candidates.append(cwd)
+
+    citc_pattern = re.compile(r"/google/src/cloud/[^/]+/([^/\s\"'\\>]+)")
+    for raw_path in candidates:
+        clean = raw_path.strip()
+        if clean.startswith("file://"):
+            clean = clean[len("file://") :]
+        m = citc_pattern.search(clean)
+        if m:
+            return m.group(1)
+        base = os.path.basename(clean.rstrip("/\\"))
+        if base and base != "google3":
+            return base
+
+    if transcript_path:
+        try:
+            p = Path(transcript_path)
+            if p.exists():
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    head = f.read(4096)
+                m = citc_pattern.search(head)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+
+    return ""
+
+
+def detect_client_app(environ: dict[str, str] | None = None, ppid: int | None = None) -> str | None:
+    """Detect whether the hook is invoked from Cider (jetski-hub-server) or IDE."""
+    env = environ if environ is not None else os.environ
+    hub_markers = ("jetski/cmd/hub/server", "jetski-hub-server", "jetski-hub.service")
+    for env_key in ("TOOLLOG_TARGET", "TOOLLOG_PATH", "SAR_ARGV0", "MEMORY_PRESSURE_WATCH"):
+        val = str(env.get(env_key) or "").lower()
+        if any(marker in val for marker in hub_markers):
+            return "cider"
+
+    proc_Paths = ["/proc/self/cgroup"]
+    if ppid and ppid > 0:
+        proc_Paths.extend([f"/proc/{ppid}/cmdline", f"/proc/{ppid}/cgroup"])
+    for proc_path in proc_Paths:
+        try:
+            p = Path(proc_path)
+            if p.exists():
+                text = p.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
+                if any(marker in text for marker in hub_markers):
+                    return "cider"
+        except Exception:
+            pass
+
+    if env.get("ANTIGRAVITY_EDITOR_APP_ROOT") or env.get("VSCODE_IPC_HOOK_CLI"):
+        return "ide"
+
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Antigravity/Jetski MF17 lifecycle status hook")
     parser.add_argument("--event", type=str, default=None, help="Explicit event name (e.g. PreInvocation, PreToolUse, Stop)")
@@ -514,14 +582,10 @@ def main() -> int:
         or sys.platform.startswith("linux")
     )
 
-    workspace_paths = payload.get("workspacePaths") or payload.get("workspace_paths") or []
-    workspace_name = ""
-    if workspace_paths and isinstance(workspace_paths, list):
-        first_wp = str(workspace_paths[0])
-        if first_wp:
-            workspace_name = os.path.basename(first_wp.rstrip("/\\"))
+    workspace_name = extract_workspace_name(payload, transcript_path=transcript_path)
+    client_app = detect_client_app(ppid=ppid)
 
-    term_prog = str(os.environ.get("TERM_PROGRAM") or "").lower()
+    term_prog = f"{os.environ.get('TERM_PROGRAM') or ''} {os.environ.get('LC_TERMINAL') or ''}".lower()
     terminal_app = None
     iterm_raw = os.environ.get("ITERM_SESSION_ID", "")
     iterm_session_id = ""
@@ -530,18 +594,19 @@ def main() -> int:
     elif iterm_raw:
         iterm_session_id = iterm_raw
 
-    if "iterm" in term_prog or iterm_raw:
-        terminal_app = "iTerm"
-    elif "apple_terminal" in term_prog:
-        terminal_app = "Terminal"
-    elif "alacritty" in term_prog:
-        terminal_app = "Alacritty"
-    elif "kitty" in term_prog:
-        terminal_app = "kitty"
-    elif "warp" in term_prog:
-        terminal_app = "Warp"
-    elif "wezterm" in term_prog:
-        terminal_app = "WezTerm"
+    if client_app != "cider":
+        if "iterm" in term_prog or iterm_raw:
+            terminal_app = "iTerm"
+        elif "apple_terminal" in term_prog:
+            terminal_app = "Terminal"
+        elif "alacritty" in term_prog:
+            terminal_app = "Alacritty"
+        elif "kitty" in term_prog:
+            terminal_app = "kitty"
+        elif "warp" in term_prog:
+            terminal_app = "Warp"
+        elif "wezterm" in term_prog:
+            terminal_app = "WezTerm"
 
     tty = ""
     if ppid and ppid > 0 and sys.platform.startswith("darwin"):
@@ -569,6 +634,7 @@ def main() -> int:
         "pid": ppid,
         "is_remote": is_remote,
         "workspace": workspace_name,
+        "client_app": client_app,
         "terminal_app": terminal_app,
         "iterm_session_id": iterm_session_id,
         "tty": tty,

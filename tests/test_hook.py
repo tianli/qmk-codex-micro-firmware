@@ -3,7 +3,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from host.jetski_status_hook import event_to_status
+from host.jetski_status_hook import (
+    detect_client_app,
+    event_to_status,
+    extract_workspace_name,
+)
 from host.codex_status_hook import status_message
 
 
@@ -304,6 +308,66 @@ class HookStatusTests(unittest.TestCase):
                 ),
                 ("complete", False),
             )
+
+    def test_extract_workspace_name_handles_citc_and_standard_paths(self):
+        # Standard CitC workspace root
+        self.assertEqual(
+            extract_workspace_name({"workspacePaths": ["/google/src/cloud/tianliyu/cc-perf-control-1"]}),
+            "cc-perf-control-1",
+        )
+        # CitC google3 or subdirectory path still resolves to the CitC client name
+        self.assertEqual(
+            extract_workspace_name({"workspacePaths": ["/google/src/cloud/tianliyu/cc-perf-control-1/google3/cloud/ai"]}),
+            "cc-perf-control-1",
+        )
+        # Fallback to cwd when workspacePaths is absent
+        self.assertEqual(
+            extract_workspace_name({"cwd": "/google/src/cloud/tianliyu/rsi-bench/google3"}),
+            "rsi-bench",
+        )
+        # Standard non-CitC local folder
+        self.assertEqual(
+            extract_workspace_name({"workspacePaths": ["/Users/tianliyu/Documents/codebase/qmk-codex-micro-firmware"]}),
+            "qmk-codex-micro-firmware",
+        )
+        # Fallback to transcript head when payload has no workspacePaths or cwd
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            transcript = Path(tmp_dir) / "transcript.jsonl"
+            transcript.write_text(
+                json.dumps({
+                    "step_index": 0,
+                    "content": "Active Document: /google/src/cloud/tianliyu/cc-onboarding/google3/BUILD",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                extract_workspace_name({}, transcript_path=str(transcript)),
+                "cc-onboarding",
+            )
+
+    def test_detect_client_app_identifies_cider_hub_and_ide(self):
+        self.assertEqual(
+            detect_client_app(
+                environ={"TOOLLOG_TARGET": "//third_party/jetski/cmd/hub/server:server_impl"},
+                ppid=0,
+            ),
+            "cider",
+        )
+        self.assertEqual(
+            detect_client_app(
+                environ={"SAR_ARGV0": "/google/bin/releases/jetski-devs/jetski-hub-server/server"},
+                ppid=0,
+            ),
+            "cider",
+        )
+        self.assertEqual(
+            detect_client_app(
+                environ={"ANTIGRAVITY_EDITOR_APP_ROOT": "/usr/local/google/home/user/.jetski-server"},
+                ppid=0,
+            ),
+            "ide",
+        )
+        self.assertIsNone(detect_client_app(environ={}, ppid=0))
 
 
 if __name__ == "__main__":
