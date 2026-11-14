@@ -110,6 +110,12 @@ class FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("send_ack(data[1], data[0], ACK_OK);", source)
         self.assertGreater(source.rindex("host_key_mask &"), source.index("status_color(agent_statuses[slot])"))
 
+    def test_firmware_emits_press_and_release_action_packets(self):
+        source = Path("firmware/keymaps/codex_micro/keymap.c").read_text(encoding="utf-8")
+        self.assertIn("MSG_ACTION_RELEASE = 0x11", source)
+        self.assertIn("packet[0] = MSG_ACTION_RELEASE;", source)
+        self.assertIn("send_action_release(action);", source)
+
 
 if __name__ == "__main__":
     unittest.main()

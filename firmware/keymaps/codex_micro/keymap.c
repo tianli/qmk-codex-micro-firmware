@@ -28,6 +28,7 @@ enum custom_keycodes {
 
 enum protocol_messages {
     MSG_ACTION = 0x10,
+    MSG_ACTION_RELEASE = 0x11,
     MSG_SET_STATUS = 0x20,
     MSG_SET_SELECTED = 0x21,
     /* Legacy LED-index lighting messages retained for bridge compatibility. */
@@ -153,6 +154,14 @@ static void send_action(uint8_t action) {
     uint8_t packet[RAW_EPSIZE] = {0};
     packet[0] = MSG_ACTION;
     packet[1] = action;
+    packet[2] = 1;
+    send_packet(packet);
+}
+
+static void send_action_release(uint8_t action) {
+    uint8_t packet[RAW_EPSIZE] = {0};
+    packet[0] = MSG_ACTION_RELEASE;
+    packet[1] = action;
     send_packet(packet);
 }
 
@@ -223,11 +232,17 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
         }
     }
 
-    if (!record->event.pressed || keycode < CX_AGENT_1 || keycode > CX_SEND) {
-        return keycode < CX_AGENT_1 || keycode > CX_SEND;
+    if (keycode < CX_AGENT_1 || keycode > CX_SEND) {
+        return true;
     }
 
-    send_action((uint8_t)(keycode - CX_AGENT_1 + 1));
+    uint8_t action = (uint8_t)(keycode - CX_AGENT_1 + 1);
+    if (!record->event.pressed) {
+        send_action_release(action);
+        return false;
+    }
+
+    send_action(action);
 
     if (keycode >= CX_AGENT_1 && keycode <= CX_AGENT_0) {
         selected_agent = (uint8_t)(keycode - CX_AGENT_1);

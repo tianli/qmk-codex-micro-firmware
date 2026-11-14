@@ -450,6 +450,14 @@ class ContextDetectionTests(unittest.TestCase):
             self.assertIn("Dictation", script)
             self.assertEqual(self.sent, [])
 
+    def test_mac_microphone_hold_to_talk_starts_on_press_and_stops_on_release(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True)
+        calls = []
+        bridge.controller.microphone = lambda keys=None, terminal_keys=None, mode="toggle": calls.append(mode)
+        bridge.process_hid_report([0x10, 16, 1])
+        bridge.process_hid_report([0x11, 16, 0])
+        self.assertEqual(calls, ["start", "stop"])
+
 
 class WindowsPageKeyInjectionTests(unittest.TestCase):
     class FakeUser32:

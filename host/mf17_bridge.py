@@ -152,6 +152,7 @@ UDP_PORT = DEFAULT_STATUS_PORT
 LOG_PATH = Path(__file__).with_name("mf17_bridge.log")
 
 MSG_ACTION = 0x10
+MSG_ACTION_RELEASE = 0x11
 MSG_SET_STATUS = 0x20
 MSG_SET_SELECTED = 0x21
 MSG_PING = 0x7E
@@ -538,7 +539,10 @@ class Bridge:
         if not report:
             return
         if report[0] == MSG_ACTION and len(report) >= 2:
-            self.perform_action(report[1])
+            hold_capable = len(report) >= 3 and report[2] == 1
+            self.perform_action(report[1], pressed=True, hold_capable=hold_capable)
+        elif report[0] == MSG_ACTION_RELEASE and len(report) >= 2:
+            self.perform_action(report[1], pressed=False, hold_capable=True)
         elif report[0] == MSG_CAPABILITIES and len(report) >= 7:
             version = int(report[2])
             key_count = int(report[3])
@@ -567,7 +571,7 @@ class Bridge:
                 f"action_layout={action_layout or 'protocol-default'}"
             )
 
-    def perform_action(self, action_id: int) -> None:
+    def perform_action(self, action_id: int, pressed: bool = True, hold_capable: bool = False) -> None:
         action_names = LEGACY_ACTION_NAMES if self.action_protocol_version == 1 else ACTION_NAMES
         name = action_names.get(action_id)
         action = self.actions.get(name) if name else None
@@ -577,6 +581,16 @@ class Bridge:
             return
 
         kind = action.get("type")
+        if not pressed:
+            if kind == "microphone":
+                self.log(f"action release id={action_id} name={name} type={kind}")
+                self.controller.microphone(
+                    keys=list(action.get("keys", [])) or None,
+                    terminal_keys=list(action.get("terminal_keys", [])) or None,
+                    mode="stop",
+                )
+            return
+
         self.log(f"action id={action_id} name={name} type={kind}")
         if kind == "agent":
             slot = int(action["slot"])
@@ -605,10 +619,17 @@ class Bridge:
         elif kind == "new_chat":
             self.controller.new_chat()
         elif kind == "microphone":
-            self.controller.microphone(
-                keys=list(action.get("keys", [])) or None,
-                terminal_keys=list(action.get("terminal_keys", [])) or None,
-            )
+            if hold_capable:
+                self.controller.microphone(
+                    keys=list(action.get("keys", [])) or None,
+                    terminal_keys=list(action.get("terminal_keys", [])) or None,
+                    mode="start",
+                )
+            else:
+                self.controller.microphone(
+                    keys=list(action.get("keys", [])) or None,
+                    terminal_keys=list(action.get("terminal_keys", [])) or None,
+                )
         elif kind == "palette":
             self.controller.palette(str(action["command"]))
         elif kind == "slash":

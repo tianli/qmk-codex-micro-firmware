@@ -330,8 +330,19 @@ class OSController:
         else:
             self.shortcut(["CTRL_OR_CMD", "SHIFT", "L"], focus=False)
 
-    def microphone(self, keys: list[str] | None = None, terminal_keys: list[str] | None = None) -> None:
-        """Invoke macOS built-in Dictation (or configured/Codex Voice shortcut)."""
+    def microphone(
+        self,
+        keys: list[str] | None = None,
+        terminal_keys: list[str] | None = None,
+        mode: str = "toggle",
+    ) -> None:
+        """Invoke macOS built-in Dictation (or configured/Codex Voice shortcut).
+
+        mode:
+          - "start": start dictation on key press (pure hold-to-talk)
+          - "stop": stop dictation on key release (pure hold-to-talk)
+          - "toggle": start if inactive, stop if active (legacy firmware fallback)
+        """
         configured = (
             os.environ.get("MF17_VOICE_KEYS", "").strip()
             or os.environ.get("MF17_MICROPHONE_KEYS", "").strip()
@@ -342,43 +353,101 @@ class OSController:
             return
 
         if self.is_mac and not self.is_codex_context():
-            script = """
-            tell application "System Events"
-                set p to first application process whose frontmost is true
-                tell p
-                    try
-                        set menuNames to name of every menu item of menu "Edit" of menu bar 1
-                        repeat with mIdx from 1 to count of menuNames
-                            set mName to item mIdx of menuNames
-                            if mName is not missing value and mName contains "Dictation" then
-                                set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                if enabled of mi then
-                                    click mi
-                                    return "STARTED"
-                                else
-                                    key code 53
-                                    return "STOPPED"
+            if mode == "stop":
+                script = """
+                delay 0.25
+                tell application "System Events"
+                    set p to first application process whose frontmost is true
+                    tell p
+                        try
+                            set menuNames to name of every menu item of menu "Edit" of menu bar 1
+                            repeat with mIdx from 1 to count of menuNames
+                                set mName to item mIdx of menuNames
+                                if mName is not missing value and mName contains "Dictation" then
+                                    set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                    if not (enabled of mi) then
+                                        key code 53
+                                        return "STOPPED"
+                                    else
+                                        return "ALREADY_STOPPED"
+                                    end if
                                 end if
-                            end if
-                        end repeat
-                    end try
+                            end repeat
+                        end try
+                    end tell
                 end tell
-            end tell
-            return "NOT_FOUND"
-            """
+                return "NOT_FOUND"
+                """
+            elif mode == "start":
+                script = """
+                tell application "System Events"
+                    set p to first application process whose frontmost is true
+                    tell p
+                        try
+                            set menuNames to name of every menu item of menu "Edit" of menu bar 1
+                            repeat with mIdx from 1 to count of menuNames
+                                set mName to item mIdx of menuNames
+                                if mName is not missing value and mName contains "Dictation" then
+                                    set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                    if enabled of mi then
+                                        click mi
+                                        return "STARTED"
+                                    else
+                                        return "ALREADY_STARTED"
+                                    end if
+                                end if
+                            end repeat
+                        end try
+                    end tell
+                end tell
+                return "NOT_FOUND"
+                """
+            else:
+                script = """
+                tell application "System Events"
+                    set p to first application process whose frontmost is true
+                    tell p
+                        try
+                            set menuNames to name of every menu item of menu "Edit" of menu bar 1
+                            repeat with mIdx from 1 to count of menuNames
+                                set mName to item mIdx of menuNames
+                                if mName is not missing value and mName contains "Dictation" then
+                                    set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                    if enabled of mi then
+                                        click mi
+                                        return "STARTED"
+                                    else
+                                        key code 53
+                                        return "STOPPED"
+                                    end if
+                                end if
+                            end repeat
+                        end try
+                    end tell
+                end tell
+                return "NOT_FOUND"
+                """
             try:
                 res = subprocess.run(
                     ["osascript", "-e", script],
                     capture_output=True,
                     text=True,
-                    timeout=1.5,
+                    timeout=1.8,
                 )
-                if res.returncode == 0 and res.stdout.strip() in {"STARTED", "STOPPED"}:
+                if res.returncode == 0 and res.stdout.strip() in {
+                    "STARTED",
+                    "STOPPED",
+                    "ALREADY_STARTED",
+                    "ALREADY_STOPPED",
+                }:
                     return
             except Exception:
                 pass
+            if mode == "stop":
+                return
 
-        self.shortcut(keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
+        if mode != "stop":
+            self.shortcut(keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
 
     def record_current_window(self) -> None:
         """Capture the currently focused window/application before switching to an agent."""
