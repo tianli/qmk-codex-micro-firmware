@@ -203,13 +203,13 @@ LEGACY_ACTION_NAMES = {
 # Default low-power ambient glow on the 7 outer control keys (using the
 # firmware's base pixel layer so white press-and-fade feedback is preserved).
 CONTROL_KEY_GLOW: tuple[tuple[int, tuple[int, int, int]], ...] = (
-    (13, (0, 28, 10)),   # Approve (num_lock): dim emerald
-    (14, (32, 0, 0)),    # Reject (divide): dim red
-    (15, (0, 28, 10)),   # Up / Prev Window (multiply): dim emerald
-    (16, (0, 28, 10)),   # Down / Scroll (minus): dim emerald
+    (13, (0, 28, 10)),   # Prev Window (num_lock): dim emerald
+    (14, (0, 28, 10)),   # Scroll Up (divide): dim emerald
+    (15, (0, 28, 10)),   # Scroll Down (multiply): dim emerald
+    (16, (32, 0, 0)),    # Reject (minus): dim red
     (9,  (0, 28, 10)),   # New Chat (plus): dim emerald
     (1,  (0, 28, 10)),   # Dictate (decimal): dim emerald
-    (2,  (0, 28, 10)),   # Send (enter): dim emerald
+    (2,  (0, 28, 10)),   # Approve / Send (enter): dim emerald
 )
 
 

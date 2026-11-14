@@ -375,26 +375,26 @@ class ActionTests(unittest.TestCase):
 
     def test_legacy_firmware_uses_six_agent_joystick_action_table(self):
         self.bridge.action_protocol_version = 1
-        self.bridge.perform_action(7)   # up -> previous_window
-        self.bridge.perform_action(9)   # down -> scroll down
-        self.bridge.perform_action(13)  # legacy approve -> ENTER
+        self.bridge.perform_action(7)   # up -> scroll down
+        self.bridge.perform_action(9)   # down -> ESC
+        self.bridge.perform_action(13)  # legacy approve -> previous_window
         self.bridge.perform_action(15)  # legacy new_chat
         self.assertEqual(self.restored_windows, 1)
         self.assertEqual(self.scrolls, ["down"])
-        self.assertEqual(self.shortcuts, [(["ENTER"], False)])
+        self.assertEqual(self.shortcuts, [(["ESC"], False)])
         self.assertEqual(self.new_chats, 1)
 
     def test_top_row_controls(self):
-        self.bridge.perform_action(11)  # Approve
-        self.bridge.perform_action(12)  # Reject
-        self.bridge.perform_action(13)  # Left arrow (previous_window)
-        self.bridge.perform_action(14)  # Right arrow (Scroll down)
-        self.assertEqual(self.shortcuts, [(["ENTER"], False), (["ESC"], False)])
+        self.bridge.perform_action(11)  # Top-left (num_lock): previous_window
+        self.bridge.perform_action(12)  # Top-second (divide): Scroll up
+        self.bridge.perform_action(13)  # Top-third (multiply): Scroll down
+        self.bridge.perform_action(14)  # Top-right (minus): Reject (ESC)
         self.assertEqual(self.restored_windows, 1)
-        self.assertEqual(self.scrolls, ["down"])
+        self.assertEqual(self.scrolls, ["up", "down"])
+        self.assertEqual(self.shortcuts, [(["ESC"], False)])
 
     def test_previous_window_action(self):
-        self.bridge.perform_action(13)
+        self.bridge.perform_action(11)
         self.assertEqual(self.restored_windows, 1)
 
     def test_shortcut_with_switch_back(self):
