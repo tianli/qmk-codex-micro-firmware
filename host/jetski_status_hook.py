@@ -103,8 +103,14 @@ except ModuleNotFoundError:
 
         PERMISSION_REQUIRED_TOOLS = {
             "run_command",
+            "edit_file",
+            "write_file",
             "write_to_file",
             "replace_file_content",
+            "multi_replace_file_content",
+            "create_file",
+            "delete_file",
+            "apply_patch",
             "notebook_edit",
             "ask_custom_permission",
         }

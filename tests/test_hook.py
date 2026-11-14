@@ -33,6 +33,14 @@ class HookStatusTests(unittest.TestCase):
             ("waiting", False),
         )
         self.assertEqual(
+            event_to_status({"toolCall": {"name": "edit_file"}}, explicit_event="PreToolUse"),
+            ("waiting", False),
+        )
+        self.assertEqual(
+            event_to_status({"toolCall": {"name": "write_file"}}, explicit_event="PreToolUse"),
+            ("waiting", False),
+        )
+        self.assertEqual(
             event_to_status({"toolCall": {"name": "write_to_file"}}, explicit_event="PreToolUse"),
             ("waiting", False),
         )
