@@ -365,7 +365,10 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if not (enabled of mi) then
+                                    if mName contains "Stop" then
+                                        click mi
+                                        return "STOPPED"
+                                    else if not (enabled of mi) then
                                         key code 53
                                         return "STOPPED"
                                     else
@@ -389,7 +392,9 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if enabled of mi then
+                                    if mName contains "Stop" then
+                                        return "ALREADY_STARTED"
+                                    else if enabled of mi then
                                         click mi
                                         return "STARTED"
                                     else
@@ -413,7 +418,10 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if enabled of mi then
+                                    if mName contains "Stop" then
+                                        click mi
+                                        return "STOPPED"
+                                    else if enabled of mi then
                                         click mi
                                         return "STARTED"
                                     else
