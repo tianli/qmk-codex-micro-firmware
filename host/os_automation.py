@@ -331,13 +331,54 @@ class OSController:
             self.shortcut(["CTRL_OR_CMD", "SHIFT", "L"], focus=False)
 
     def microphone(self, keys: list[str] | None = None, terminal_keys: list[str] | None = None) -> None:
-        """Invoke the Voice shortcut configured in the desktop app's Settings."""
+        """Invoke macOS built-in Dictation (or configured/Codex Voice shortcut)."""
         configured = (
             os.environ.get("MF17_VOICE_KEYS", "").strip()
             or os.environ.get("MF17_MICROPHONE_KEYS", "").strip()
         )
         desktop_keys = [item.strip() for item in configured.split(",") if item.strip()] if configured else None
-        self.shortcut(desktop_keys or keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
+        if desktop_keys:
+            self.shortcut(desktop_keys, focus=False)
+            return
+
+        if self.is_mac and not self.is_codex_context():
+            script = """
+            tell application "System Events"
+                set p to first application process whose frontmost is true
+                tell p
+                    try
+                        set menuNames to name of every menu item of menu "Edit" of menu bar 1
+                        repeat with mIdx from 1 to count of menuNames
+                            set mName to item mIdx of menuNames
+                            if mName is not missing value and mName contains "Dictation" then
+                                set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                if enabled of mi then
+                                    click mi
+                                    return "STARTED"
+                                else
+                                    key code 53
+                                    return "STOPPED"
+                                end if
+                            end if
+                        end repeat
+                    end try
+                end tell
+            end tell
+            return "NOT_FOUND"
+            """
+            try:
+                res = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                )
+                if res.returncode == 0 and res.stdout.strip() in {"STARTED", "STOPPED"}:
+                    return
+            except Exception:
+                pass
+
+        self.shortcut(keys or ["CTRL_OR_CMD", "SHIFT", "D"], focus=False)
 
     def record_current_window(self) -> None:
         """Capture the currently focused window/application before switching to an agent."""

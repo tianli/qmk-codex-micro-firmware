@@ -438,6 +438,18 @@ class ContextDetectionTests(unittest.TestCase):
         self.assertEqual(wheel, ["up", "down"])
         self.assertEqual(self.sent, [])
 
+    def test_mac_microphone_triggers_edit_menu_dictation(self):
+        self.controller.is_mac = True
+        self.controller._foreground_context = lambda: "iterm2"
+        fake_res = unittest.mock.MagicMock(returncode=0, stdout="STARTED\n")
+        with unittest.mock.patch("subprocess.run", return_value=fake_res) as mock_run:
+            self.controller.microphone(["CTRL_OR_CMD", "SHIFT", "D"])
+            self.assertEqual(mock_run.call_count, 1)
+            script = mock_run.call_args[0][0][2]
+            self.assertIn('menu "Edit" of menu bar 1', script)
+            self.assertIn("Dictation", script)
+            self.assertEqual(self.sent, [])
+
 
 class WindowsPageKeyInjectionTests(unittest.TestCase):
     class FakeUser32:
