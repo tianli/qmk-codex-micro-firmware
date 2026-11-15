@@ -330,6 +330,48 @@ class OSController:
         else:
             self.shortcut(["CTRL_OR_CMD", "SHIFT", "L"], focus=False)
 
+    def _ensure_mac_dictation_ready(self) -> None:
+        """Ensure com.apple.inputmethod.ironwood (DictationIM) is enabled and selected in HIToolbox."""
+        if not self.is_mac:
+            return
+        try:
+            hitoolbox = getattr(self, "_hitoolbox", None)
+            cf = getattr(self, "_corefoundation", None)
+            if hitoolbox is None or cf is None:
+                hitoolbox = ctypes.cdll.LoadLibrary(
+                    "/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/HIToolbox"
+                )
+                cf = ctypes.cdll.LoadLibrary(
+                    "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+                )
+                cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+                cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+                cf.CFRelease.restype = None
+                cf.CFRelease.argtypes = [ctypes.c_void_p]
+                hitoolbox.TISCopyInputSourceRefForInputSourceID.restype = ctypes.c_void_p
+                hitoolbox.TISCopyInputSourceRefForInputSourceID.argtypes = [ctypes.c_void_p]
+                hitoolbox.TISEnableInputSource.restype = ctypes.c_int32
+                hitoolbox.TISEnableInputSource.argtypes = [ctypes.c_void_p]
+                hitoolbox.TISSelectInputSource.restype = ctypes.c_int32
+                hitoolbox.TISSelectInputSource.argtypes = [ctypes.c_void_p]
+                self._hitoolbox = hitoolbox
+                self._corefoundation = cf
+
+            cf_id = cf.CFStringCreateWithCString(None, b"com.apple.inputmethod.ironwood", 0x08000100)
+            if cf_id:
+                try:
+                    src = hitoolbox.TISCopyInputSourceRefForInputSourceID(cf_id)
+                    if src:
+                        try:
+                            hitoolbox.TISEnableInputSource(src)
+                            hitoolbox.TISSelectInputSource(src)
+                        finally:
+                            cf.CFRelease(src)
+                finally:
+                    cf.CFRelease(cf_id)
+        except Exception:
+            pass
+
     def microphone(
         self,
         keys: list[str] | None = None,
@@ -353,6 +395,7 @@ class OSController:
             return
 
         if self.is_mac and not self.is_codex_context():
+            self._ensure_mac_dictation_ready()
             if mode == "stop":
                 script = """
                 delay 0.25
@@ -365,14 +408,29 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if mName contains "Stop" then
+                                    if mName contains "Stop" or mName contains "Cancel" then
                                         click mi
                                         return "STOPPED"
                                     else if not (enabled of mi) then
                                         key code 53
                                         return "STOPPED"
                                     else
-                                        return "ALREADY_STOPPED"
+                                        click menu bar item "Edit" of menu bar 1
+                                        delay 0.05
+                                        set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                        set mName to name of mi
+                                        if mName contains "Stop" or mName contains "Cancel" then
+                                            click mi
+                                            return "STOPPED"
+                                        else if not (enabled of mi) then
+                                            key code 53
+                                            delay 0.05
+                                            key code 53
+                                            return "STOPPED"
+                                        else
+                                            key code 53
+                                            return "ALREADY_STOPPED"
+                                        end if
                                     end if
                                 end if
                             end repeat
@@ -392,12 +450,30 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if mName contains "Stop" then
-                                        return "ALREADY_STARTED"
+                                    if mName contains "Stop" or mName contains "Cancel" or not (enabled of mi) then
+                                        click menu bar item "Edit" of menu bar 1
+                                        delay 0.05
+                                        set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                        set mName to name of mi
+                                    end if
+                                    if mName contains "Stop" or mName contains "Cancel" then
+                                        click mi
+                                        delay 0.15
+                                        click menu bar item "Edit" of menu bar 1
+                                        delay 0.05
+                                        set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                        if enabled of mi then
+                                            click mi
+                                            return "STARTED"
+                                        else
+                                            key code 53
+                                            return "ALREADY_STARTED"
+                                        end if
                                     else if enabled of mi then
                                         click mi
                                         return "STARTED"
                                     else
+                                        key code 53
                                         return "ALREADY_STARTED"
                                     end if
                                 end if
@@ -418,7 +494,13 @@ class OSController:
                                 set mName to item mIdx of menuNames
                                 if mName is not missing value and mName contains "Dictation" then
                                     set mi to menu item mIdx of menu "Edit" of menu bar 1
-                                    if mName contains "Stop" then
+                                    if mName contains "Stop" or mName contains "Cancel" then
+                                        click menu bar item "Edit" of menu bar 1
+                                        delay 0.05
+                                        set mi to menu item mIdx of menu "Edit" of menu bar 1
+                                        set mName to name of mi
+                                    end if
+                                    if mName contains "Stop" or mName contains "Cancel" then
                                         click mi
                                         return "STOPPED"
                                     else if enabled of mi then
@@ -440,7 +522,7 @@ class OSController:
                     ["osascript", "-e", script],
                     capture_output=True,
                     text=True,
-                    timeout=1.8,
+                    timeout=2.5,
                 )
                 if res.returncode == 0 and res.stdout.strip() in {
                     "STARTED",
