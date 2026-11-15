@@ -1,6 +1,6 @@
 # MF17 Codex / Antigravity Keypad Controller
 
-This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated physical control surface for **Codex and Antigravity** with **10 task status channels**. The bridge accepts both providers on the same UDP protocol and routes task selection to the appropriate desktop deep link.
+This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated physical control surface for **Codex and Antigravity** with **10 task status channels**. The bridge accepts both providers on the same UDP protocol and routes task selection to the appropriate desktop deep link. You can buy the hardware keyboard for ~$25 on Amazon, and spend another $15 for a set of translucent keycaps for lighting effects.
 
 ---
 
