@@ -38,9 +38,9 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 
 ### Agent Status & Control Key LED Colors
 
-- ⚪ **White** (`#FFFFFF`): Idle
 - 🔵 **Blue** (`#304FFE`): Working / Generating / Thinking
 - 🟠 **Amber** (`#FF6D00`): Waiting for user input / tool permission / diff approval
+- 🟣 **Purple** (`#FF6D00`): External tool call
 - 🟢 **Green** (`#00FF4C`): Turn complete
 - 🔴 **Red** (`#FF0033`): Error
 - ⚫ **Off**: Slot unassigned
