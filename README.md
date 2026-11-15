@@ -8,8 +8,8 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 
 ```text
 +-------------------+-------------------+-------------------+-------------------+
-|      Approve      |      Reject       |      Page Up      |     Page Down     |
-|      (Top 1)      |      (Top 2)      |      (Top 3)      |      (Top 4)      |
+|    Prev Window    |     Scroll Up     |    Scroll Down    |      Reject       |
+|   (Key 'NumLk')   |     (Key '/')     |     (Key '*')     |     (Key '-')     |
 +-------------------+-------------------+-------------------+-------------------+
 |      Agent 7      |      Agent 8      |      Agent 9      |     New Chat      |
 |     (Key '7')     |     (Key '8')     |     (Key '9')     |     (Key '+')     |
@@ -17,35 +17,35 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 |      Agent 4      |      Agent 5      |      Agent 6      |                   |
 |     (Key '4')     |     (Key '5')     |     (Key '6')     |                   |
 +-------------------+-------------------+-------------------+-------------------+
-|      Agent 1      |      Agent 2      |      Agent 3      |       Send        |
+|      Agent 1      |      Agent 2      |      Agent 3      |  Approve / Send   |
 |     (Key '1')     |     (Key '2')     |     (Key '3')     |   (Key 'Enter')   |
 +-------------------+-------------------+-------------------+                   |
-|               Agent 0 / 10            |     Dictate       |                   |
-|                (Key '0')              |    (Key '.')      |                   |
+|               Agent 0 / 10            |  Dictate (Hold)   |                   |
+|                (Key '0')              |     (Key '.')     |                   |
 +---------------------------------------+-------------------+-------------------+
 ```
 
 ### Controls
 
-- **Agent 0 – 9** (Keys `0` through `9`): Key `0` selects the most recent active conversation, Key `1` selects the next most recent, continuing in order through Key `9`. Codex slots follow the desktop app's active-task recency and exclude archived, voice-only, guardian, reviewer, and subagent threads. The physical LED under each numeric key reflects that task's live status.
-- **Top Row Left (Top 1)**: **Approve** (`Enter`) to confirm tool permissions or choices.
-- **Top Row Mid-Left (Top 2)**: **Reject** (`Escape`) to decline tool execution or dismiss prompts.
-- **Top Row Mid-Right (Top 3)**: Context-aware Page Up. The bridge detects a terminal foreground window and sends `Shift+Page Up`; in the Codex desktop thread it sends plain `Page Up`.
-- **Top Row Right (Top 4)**: Context-aware Page Down, using the matching terminal (`Shift+Page Down`) or desktop (`Page Down`) behavior.
-- **New Chat** (`+` key): In Codex, opens the command palette's stable **New chat** command; other supported hosts retain the legacy `Cmd/Ctrl+Shift+L` fallback.
-- **Voice / Mic** (`.` key): Sends the Voice shortcut configured in Codex/ChatGPT Desktop Settings, even when a terminal has focus. The app has no documented default Voice shortcut; configure `Ctrl+Shift+D` in the app, or set `MF17_VOICE_KEYS` to the comma-separated shortcut you chose. Set `MF17_SCROLL_CONTEXT=terminal` or `desktop` to override terminal detection.
-- **Send** (`Enter` key): Submit the current prompt or input (`Enter`).
+- **Agent 0 – 9** (Keys `0` through `9`): Key `1` – `9` and `0` (slot 10) select and focus the corresponding active agent conversation across local or remote Antigravity/Jetski (Desktop IDE, Chrome Cider tab, or iTerm2/Terminal CLI) and Codex sessions, even across different macOS Desktops/Spaces. When no live hook session is bound to a slot, `0` selects the most recent active conversation, `1` selects the next most recent, continuing through `9`. The physical LED under each numeric key reflects that task's live status.
+- **Top Row Left (`Num Lock` / Top 1)**: **Prev Window** — switches back to your previously focused non-agent window or browser tab (across macOS Desktops/Spaces).
+- **Top Row Mid-Left (`/` / Top 2)**: **Scroll Up** — context-aware Page Up (`Shift+Page Up` in terminal emulators; `Page Up` in desktop/browser views).
+- **Top Row Mid-Right (`*` / Top 3)**: **Scroll Down** — context-aware Page Down (`Shift+Page Down` in terminal emulators; `Page Down` in desktop/browser views).
+- **Top Row Right (`-` / Top 4)**: **Reject** (`Escape`) — declines tool execution, rejects diff/permission prompts, or dismisses dialogs.
+- **New Chat** (`+` key): In Codex, opens the command palette's stable **New chat** command; in other hosts, sends `Cmd/Ctrl+Shift+L`.
+- **Dictate (Hold)** (`.` key): **Hold-to-Talk Voice Dictation** — holding `.` starts macOS built-in Dictation (`Edit → Start Dictation`) in the active window (Chrome, Jetski, iTerm2, etc.) and releasing `.` automatically stops Dictation. In Codex (or when `MF17_VOICE_KEYS` is set), triggers the configured voice shortcut.
+- **Approve / Send** (`Enter` key): **Approve** (`Enter`) to confirm tool permissions / diff prompts, or **Send** to submit the current prompt.
 
-### Agent Status LED Colors
+### Agent Status & Control Key LED Colors
 
 - ⚪ **White** (`#FFFFFF`): Idle
 - 🔵 **Blue** (`#304FFE`): Working / Generating / Thinking
-- 🟠 **Amber** (`#FF6D00`): Waiting for user input / tool permission
+- 🟠 **Amber** (`#FF6D00`): Waiting for user input / tool permission / diff approval
 - 🟢 **Green** (`#00FF4C`): Turn complete
 - 🔴 **Red** (`#FF0033`): Error
 - ⚫ **Off**: Slot unassigned
 
-Non-agent control keys feature instant hardware press feedback: pressing any control key illuminates it white and smoothly fades over 900 ms.
+The 7 outer control keys feature a low-power ambient backlight so they are easy to locate in the dark (**Reject** `-` glows dim red; the other 6 control keys glow dim emerald) while preserving instant white press-and-fade hardware feedback over 900 ms.
 
 ---
 
