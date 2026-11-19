@@ -1,11 +1,11 @@
 # MF17 Codex / Antigravity Keypad Controller & macOS Menu Bar Status Pills
 
-This project provides two live control surfaces for **Codex and Antigravity/Jetski** with **10 task status channels** (usable together or independently):
+This project provides two live control surfaces for **Codex and Antigravity** (coding agents) with **10 task status channels** (usable together or independently):
 
 1. **Physical Keypad**: Turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated backlit control surface. You can buy the hardware keyboard for ~$25 on Amazon, and spend another $15 for a set of translucent keycaps for lighting effects.
 2. **macOS Menu Bar Colored Number Pills** (no hardware required): A native Swift macOS menu bar app ([`AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift)) that displays individual colored numbered pills (`1`–`9`, `0`) across every display's menu bar, with one-click window/tab switching across macOS Spaces.
 
-The bridge accepts both providers (local and remote/Cloudtop over UDP + TCP) and tracks both primary agents and spawned subagents, automatically keeping a slot Amber whenever the parent agent or any subagent is blocked waiting for user input.
+The bridge accepts both providers (local and remote over UDP + TCP) and tracks both primary coding agents and spawned subagents, automatically keeping a slot Amber whenever the parent agent or any subagent is blocked waiting for user input.
 
 ---
 
@@ -32,13 +32,13 @@ The bridge accepts both providers (local and remote/Cloudtop over UDP + TCP) and
 
 ### Controls
 
-- **Agent 0 – 9** (Keys `0` through `9`): Key `1` – `9` and `0` (slot 10) select and focus the corresponding active agent conversation across local or remote Antigravity/Jetski (Desktop IDE, Chrome Cider tab, or iTerm2/Terminal CLI) and Codex sessions, even across different macOS Desktops/Spaces. When no live hook session is bound to a slot, `0` selects the most recent active conversation, `1` selects the next most recent, continuing through `9`. The physical LED under each numeric key reflects that task's live status.
+- **Agent 0 – 9** (Keys `0` through `9`): Key `1` – `9` and `0` (slot 10) select and focus the corresponding active coding agent conversation across local or remote Antigravity (Desktop IDE, browser IDE tab, or iTerm2/Terminal CLI) and Codex sessions, even across different macOS Desktops/Spaces. When no live hook session is bound to a slot, `0` selects the most recent active conversation, `1` selects the next most recent, continuing through `9`. The physical LED under each numeric key reflects that task's live status.
 - **Top Row Left (`Num Lock` / Top 1)**: **Prev Window** — switches back to your previously focused non-agent window or browser tab (across macOS Desktops/Spaces).
 - **Top Row Mid-Left (`/` / Top 2)**: **Scroll Up** — context-aware Page Up (`Shift+Page Up` in terminal emulators; `Page Up` in desktop/browser views).
 - **Top Row Mid-Right (`*` / Top 3)**: **Scroll Down** — context-aware Page Down (`Shift+Page Down` in terminal emulators; `Page Down` in desktop/browser views).
 - **Top Row Right (`-` / Top 4)**: **Reject** (`Escape`) — declines tool execution, rejects diff/permission prompts, or dismisses dialogs.
 - **New Chat** (`+` key): In Codex, opens the command palette's stable **New chat** command; in other hosts, sends `Cmd/Ctrl+Shift+L`.
-- **Dictate (Hold)** (`.` key): **Hold-to-Talk Voice Dictation** — holding `.` starts macOS built-in Dictation (`Edit → Start Dictation`) in the active window (Chrome, Jetski, iTerm2, etc.) and releasing `.` automatically stops Dictation. In Codex (or when `MF17_VOICE_KEYS` is set), triggers the configured voice shortcut.
+- **Dictate (Hold)** (`.` key): **Hold-to-Talk Voice Dictation** — holding `.` starts macOS built-in Dictation (`Edit → Start Dictation`) in the active window (Chrome, Antigravity, iTerm2, etc.) and releasing `.` automatically stops Dictation. In Codex (or when `MF17_VOICE_KEYS` is set), triggers the configured voice shortcut.
 - **Approve / Send** (`Enter` key): **Approve** (`Enter`) to confirm tool permissions / diff prompts, or **Send** to submit the current prompt.
 
 ### Agent Status Colors (Keypad LEDs & Menu Bar Pills)
@@ -59,7 +59,7 @@ The 7 outer control keys on the keypad feature a low-power ambient backlight so 
 Don't have the MF17 keypad plugged in — or want on-screen status pills alongside the keypad? [`AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift) renders **individual native `NSStatusItem` colored number pills** (`1`–`9`, `0`) in the macOS top-right menu bar:
 
 - **Visible on every desktop & display**: Uses native `NSStatusItem` images so macOS replicates the pills across all monitors and Spaces in strict `1`–`9`, `0` order.
-- **Left-click any pill**: Flashes briefly and switches straight to that agent's Chrome Cider tab, Jetski Desktop IDE window, or iTerm2 pane — even across different macOS Desktops/Spaces, identical to pressing the matching keypad key.
+- **Left-click any pill**: Flashes briefly and switches straight to that coding agent's browser IDE tab, Antigravity Desktop window, or iTerm2 pane — even across different macOS Desktops/Spaces, identical to pressing the matching keypad key.
 - **Hover tooltip**: Shows each pill's `[key] workspace — status (host app)` individually.
 - **Right-click (or Control/Option-click)**: Opens the session dropdown menu:
   - Click any session row directly to focus it
@@ -86,10 +86,10 @@ python3 -m venv .venv
 
 ### 2. Enable lifecycle hooks
 
-For Antigravity/Jetski, install the lifecycle hooks into `~/.gemini/config/hooks.json`:
+For Antigravity, install the lifecycle hooks into `~/.gemini/config/hooks.json`:
 
 ```bash
-./scripts/install-jetski-hooks.sh
+./scripts/install-antigravity-hooks.sh
 ```
 
 For Codex, install the provider-tagged hooks into `~/.codex/hooks.json`:
@@ -98,10 +98,10 @@ For Codex, install the provider-tagged hooks into `~/.codex/hooks.json`:
 ./scripts/install-global-hooks.ps1
 ```
 
-Both hook adapters send status-only UDP packets to the bridge and preserve the
+Both hook adapters send status-only UDP/TCP packets to the bridge and preserve the
 native approval/prompt behavior of their host application. Codex task IDs are
-opened with `codex://threads/<id>`; Antigravity task IDs use
-`jetski-ide://conversation/<id>`.
+opened with `codex://threads/<id>`, while Antigravity task IDs route directly to
+the corresponding desktop IDE window, browser IDE tab, or terminal session.
 
 ---
 
@@ -155,8 +155,8 @@ To rebuild the app bundle manually after editing `AgentStatusBar.swift`:
 - `POST /slots/<slot>/clear`, `POST /slots/clear-completed`, `POST /slots/clear-all` — clear slots
 - `POST /previous-window` — switch back to the previously active non-agent window
 
-#### Remote / Cloudtop Agents over SSH
-To forward status updates from a remote host (such as Cloudtop) to your local Mac bridge, add a reverse TCP forward in `~/.ssh/config`:
+#### Remote Coding Agents over SSH
+To forward status updates from a remote host to your local Mac bridge, add a reverse TCP forward in `~/.ssh/config`:
 ```sshconfig
 Host <your-remote-host>
     RemoteForward 41717 127.0.0.1:41717
