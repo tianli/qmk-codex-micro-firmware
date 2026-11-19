@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -10,18 +11,23 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Any
 
 try:
     from host.status_common import (
+        COMMAND_PERMISSION_TOOLS,
         DEFAULT_STATUS_HOST as HOST,
         DEFAULT_STATUS_PORT as PORT,
         PERMISSION_REQUIRED_TOOLS,
         PERMISSION_TOOL_NAMES,
         PROVIDER_ANTIGRAVITY,
+        SUBAGENT_SPAWN_TOOLS,
         USER_PROMPT_PATTERNS,
         WAITING_NAME_MARKERS,
         WAITING_REASON_MARKERS,
+        aggregate_subagent_transcript_states,
         base_tool_name as _base_tool_name,
         is_interactive_tool as _is_interactive_tool,
         is_permission_tool as _is_permission_tool,
@@ -32,14 +38,17 @@ try:
 except ModuleNotFoundError:
     try:
         from status_common import (  # type: ignore[no-redef]
+            COMMAND_PERMISSION_TOOLS,
             DEFAULT_STATUS_HOST as HOST,
             DEFAULT_STATUS_PORT as PORT,
             PERMISSION_REQUIRED_TOOLS,
             PERMISSION_TOOL_NAMES,
             PROVIDER_ANTIGRAVITY,
+            SUBAGENT_SPAWN_TOOLS,
             USER_PROMPT_PATTERNS,
             WAITING_NAME_MARKERS,
             WAITING_REASON_MARKERS,
+            aggregate_subagent_transcript_states,
             base_tool_name as _base_tool_name,
             is_interactive_tool as _is_interactive_tool,
             is_permission_tool as _is_permission_tool,
@@ -114,6 +123,32 @@ except ModuleNotFoundError:
             "notebook_edit",
             "ask_custom_permission",
         }
+
+        SUBAGENT_SPAWN_TOOLS = {
+            "invoke_subagent",
+            "swarm",
+            "run_workflow",
+        }
+
+        COMMAND_PERMISSION_TOOLS = {
+            "run_command",
+            "bash",
+            "execute_command",
+            "terminal",
+        }
+
+        _SUBAGENT_CONV_ID_RE = re.compile(
+            r'"conversationId"\s*:\s*"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"',
+            re.IGNORECASE,
+        )
+        _SUBAGENT_SENDER_RE = re.compile(
+            r"\bsender=([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\s|$)",
+            re.IGNORECASE,
+        )
+        _CONVERSATION_URI_RE = re.compile(
+            r"conversation://([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})",
+            re.IGNORECASE,
+        )
 
         def _looks_like_user_prompt(message: Any) -> bool:
             if not isinstance(message, str):
@@ -191,6 +226,202 @@ except ModuleNotFoundError:
                     elif "running as a background task" in content.lower():
                         running_tasks.add("generic_running_task")
             return completed_tasks, running_tasks
+
+        def parse_iso_timestamp(value: Any) -> float | None:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            s = value.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            s = re.sub(r"\.(\d{6})\d+", r".\1", s)
+            try:
+                return datetime.fromisoformat(s).timestamp()
+            except ValueError:
+                return None
+
+        def extract_subagent_ids_from_lines(
+            lines: list[bytes | str],
+            parent_session_id: str | None = None,
+        ) -> list[str]:
+            parent_lower = (parent_session_id or "").strip().lower()
+            seen: set[str] = set()
+            ordered: list[str] = []
+
+            def _add(cid: str) -> None:
+                norm = cid.strip().lower()
+                if norm and norm != parent_lower and norm not in seen:
+                    seen.add(norm)
+                    ordered.append(cid.strip())
+
+            for raw_line in lines:
+                if isinstance(raw_line, bytes):
+                    try:
+                        line_str = raw_line.decode("utf-8", errors="replace")
+                    except Exception:
+                        continue
+                else:
+                    line_str = raw_line
+
+                if "conversationId" not in line_str and "sender=" not in line_str and "conversation://" not in line_str:
+                    continue
+                try:
+                    record = json.loads(line_str)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                step_type = str(record.get("type") or "")
+                content = str(record.get("content") or "")
+                if step_type in {"GENERIC", "TOOL_USE", "TOOL_CALL", "TOOL_RESULT"}:
+                    lower_content = content.lower()
+                    if "subagent" in lower_content or "swarm" in lower_content or "worker" in lower_content:
+                        for m in _SUBAGENT_CONV_ID_RE.finditer(content):
+                            _add(m.group(1))
+                        for m in _CONVERSATION_URI_RE.finditer(content):
+                            _add(m.group(1))
+                elif step_type == "SYSTEM_MESSAGE":
+                    for m in _SUBAGENT_SENDER_RE.finditer(content):
+                        _add(m.group(1))
+            return ordered
+
+        def inspect_jetski_transcript_actor_state(
+            path: Path,
+            now: float | None = None,
+            is_subagent: bool = True,
+        ) -> str | None:
+            try:
+                if not path.exists():
+                    return None
+                stat = path.stat()
+                if stat.st_size <= 0:
+                    return None
+                with path.open("rb") as stream:
+                    size = stream.seek(0, os.SEEK_END)
+                    start = max(0, size - 256 * 1024)
+                    stream.seek(start)
+                    if start:
+                        stream.readline()
+                    lines = stream.readlines()
+            except OSError:
+                return None
+
+            if not lines:
+                return None
+
+            _, running_tasks = scan_transcript_background_tasks(lines)
+            records: list[dict[str, Any]] = []
+            for raw_line in lines:
+                try:
+                    rec = json.loads(raw_line)
+                    if isinstance(rec, dict):
+                        records.append(rec)
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                    continue
+            if not records:
+                return None
+
+            last_planner_idx: int | None = None
+            for idx in range(len(records) - 1, -1, -1):
+                if records[idx].get("type") in {"PLANNER_RESPONSE", "assistant_message"}:
+                    last_planner_idx = idx
+                    break
+            if last_planner_idx is None:
+                return "executing" if is_subagent else "thinking"
+
+            planner = records[last_planner_idx]
+            after = records[last_planner_idx + 1 :]
+            tool_calls = planner.get("tool_calls") or []
+            planner_status = str(planner.get("status") or "")
+
+            if not tool_calls:
+                if any(r.get("type") in {"USER_INPUT", "SYSTEM_MESSAGE"} for r in after):
+                    return "executing" if (is_subagent or running_tasks) else "thinking"
+                if running_tasks:
+                    return "executing"
+                if planner_status == "ERROR" or planner.get("error"):
+                    return "error"
+                if not is_subagent and _looks_like_user_prompt(planner.get("content")):
+                    return "waiting"
+                if planner_status == "DONE":
+                    return "complete"
+                return "executing" if is_subagent else "thinking"
+
+            result_steps = [
+                r for r in after if r.get("type") in {"GENERIC", "TOOL_USE", "TOOL_CALL", "TOOL_RESULT"}
+            ]
+            if len(result_steps) >= len(tool_calls):
+                return "executing"
+
+            now_ts = now if now is not None else time.time()
+            planner_ts = parse_iso_timestamp(planner.get("created_at"))
+            if planner_ts is None:
+                planner_ts = stat.st_mtime
+            elapsed = max(0.0, now_ts - planner_ts)
+
+            for tc in tool_calls:
+                if isinstance(tc, dict) and _is_interactive_tool(str(tc.get("name") or "")):
+                    return "waiting"
+
+            perm_tools = [
+                tc
+                for tc in tool_calls
+                if isinstance(tc, dict) and _is_permission_tool(str(tc.get("name") or ""))
+            ]
+            if perm_tools:
+                fast_perm = [
+                    tc
+                    for tc in perm_tools
+                    if _base_tool_name(str(tc.get("name") or "")) not in COMMAND_PERMISSION_TOOLS
+                ]
+                cmd_perm = [
+                    tc
+                    for tc in perm_tools
+                    if _base_tool_name(str(tc.get("name") or "")) in COMMAND_PERMISSION_TOOLS
+                ]
+                if fast_perm and elapsed >= 1.0:
+                    return "waiting"
+                if cmd_perm and elapsed >= 3.5:
+                    return "waiting"
+
+            return "executing"
+
+        def aggregate_subagent_transcript_states(
+            brain_dir: Path,
+            parent_lines: list[bytes | str],
+            parent_session_id: str | None = None,
+            now: float | None = None,
+        ) -> dict[str, str]:
+            if not brain_dir.exists():
+                return {}
+            states: dict[str, str] = {}
+            visited: set[str] = {(parent_session_id or "").strip().lower()}
+            queue: list[tuple[str, int]] = [
+                (sub_id, 1)
+                for sub_id in extract_subagent_ids_from_lines(parent_lines, parent_session_id=parent_session_id)
+            ]
+            while queue:
+                sub_id, depth = queue.pop(0)
+                norm = sub_id.lower()
+                if norm in visited:
+                    continue
+                visited.add(norm)
+                sub_transcript = brain_dir / sub_id / ".system_generated" / "logs" / "transcript.jsonl"
+                if not sub_transcript.exists():
+                    continue
+                state = inspect_jetski_transcript_actor_state(sub_transcript, now=now, is_subagent=True)
+                if state is not None:
+                    states[sub_id] = state
+                if depth < 2:
+                    try:
+                        with sub_transcript.open("rb") as f:
+                            size = f.seek(0, os.SEEK_END)
+                            f.seek(max(0, size - 128 * 1024))
+                            nested_lines = f.readlines()
+                        for child_id in extract_subagent_ids_from_lines(nested_lines, parent_session_id=sub_id):
+                            if child_id.lower() not in visited:
+                                queue.append((child_id, depth + 1))
+                    except OSError:
+                        pass
+            return states
 
 
 def _event_name(event: dict[str, Any], explicit_event: str | None = None) -> str:
@@ -319,42 +550,100 @@ def _get_last_assistant_message(event: dict[str, Any]) -> str:
     return ""
 
 
+def _resolve_transcript_path(event: dict[str, Any], session_id: str | None = None) -> Path | None:
+    tpath = event.get("transcriptPath") or event.get("transcript_path")
+    if tpath:
+        p = Path(str(tpath))
+        if p.exists():
+            return p
+    conv_id = session_id or event.get("conversationId") or event.get("conversation_id") or event.get("session_id")
+    if conv_id:
+        cand = Path.home() / ".gemini" / "jetski" / "brain" / str(conv_id) / ".system_generated" / "logs" / "transcript.jsonl"
+        if cand.exists():
+            return cand
+    return None
+
+
+def _read_tail_lines(path: Path, max_bytes: int = 256 * 1024) -> list[bytes]:
+    try:
+        with path.open("rb") as f:
+            size = f.seek(0, 2)
+            start = max(0, size - max_bytes)
+            f.seek(start)
+            if start:
+                f.readline()
+            return f.readlines()
+    except OSError:
+        return []
+
+
+def _get_subagent_states_for_event(event: dict[str, Any], session_id: str | None = None) -> dict[str, str]:
+    p = _resolve_transcript_path(event, session_id=session_id)
+    if not p or p.parent.name != "logs" or p.parent.parent.name != ".system_generated":
+        return {}
+    try:
+        lines = _read_tail_lines(p)
+        if not lines:
+            return {}
+        return aggregate_subagent_transcript_states(
+            p.parents[3],
+            lines,
+            parent_session_id=p.parents[2].name,
+        )
+    except Exception:
+        return {}
+
+
+def _latest_planner_has_tool_calls(event: dict[str, Any]) -> bool:
+    """Return True if the latest PLANNER_RESPONSE in transcript emitted tool calls."""
+    p = _resolve_transcript_path(event)
+    if not p:
+        return False
+    lines = _read_tail_lines(p, max_bytes=128 * 1024)
+    for raw_line in reversed(lines):
+        try:
+            rec = json.loads(raw_line)
+        except Exception:
+            continue
+        if rec.get("type") in {"PLANNER_RESPONSE", "assistant_message"}:
+            return bool(rec.get("tool_calls"))
+    return False
+
+
 def _has_running_background_tasks(event: dict[str, Any]) -> bool:
     """Return True if background tasks or subagents are still running."""
     # 1. Antigravity protojson explicitly passes fullyIdle: false when background tasks/subagents run
     if event.get("fullyIdle") is False or event.get("fully_idle") is False:
         return True
 
-    # 2. Check if the current tool_response or event itself indicates a background task
-    tool_name = _tool_name(event)
+    # 2. Check if the current tool_response or event itself indicates a background task or subagent spawn
+    tool_name = _base_tool_name(_tool_name(event))
+    if tool_name in SUBAGENT_SPAWN_TOOLS:
+        return True
     if tool_name in {"run_command", "bash", "execute_command", "terminal"}:
-        tool_resp = str(event.get("tool_response") or "")
+        tool_resp = str(event.get("tool_response") or event.get("result") or "")
         if "running as a background task" in tool_resp.lower() or "sent to the background as a task" in tool_resp.lower():
             return True
 
-    # 3. Inspect transcript tail for any uncompleted background tasks
-    tpath = event.get("transcriptPath") or event.get("transcript_path")
-    if not tpath:
-        conv_id = event.get("conversationId") or event.get("conversation_id") or event.get("session_id")
-        if conv_id:
-            cand = Path.home() / ".gemini" / "jetski" / "brain" / str(conv_id) / ".system_generated" / "logs" / "transcript.jsonl"
-            if cand.exists():
-                tpath = str(cand)
-
-    if tpath:
-        try:
-            p = Path(tpath)
-            if p.exists():
-                with open(p, "rb") as f:
-                    size = f.seek(0, 2)
-                    f.seek(max(0, size - 256 * 1024))
-                    lines = f.readlines()
-
-                _, running_tasks = scan_transcript_background_tasks(lines)
-                if running_tasks:
-                    return True
-        except Exception:
-            pass
+    # 3. Inspect transcript tail for any uncompleted background tasks or active subagents
+    p = _resolve_transcript_path(event)
+    if p:
+        lines = _read_tail_lines(p)
+        if lines:
+            _, running_tasks = scan_transcript_background_tasks(lines)
+            if running_tasks:
+                return True
+            if p.parent.name == "logs" and p.parent.parent.name == ".system_generated":
+                try:
+                    sub_states = aggregate_subagent_transcript_states(
+                        p.parents[3],
+                        lines,
+                        parent_session_id=p.parents[2].name,
+                    )
+                    if any(st not in {"complete", "off", "idle"} for st in sub_states.values()):
+                        return True
+                except Exception:
+                    pass
     return False
 
 
@@ -424,6 +713,10 @@ def event_to_status(event: dict[str, Any], explicit_event: str | None = None) ->
     if name in {"postinvocation", "post_invocation"}:
         if has_error:
             return "error", False
+        if _latest_planner_has_tool_calls(event):
+            if _has_running_background_tasks(event):
+                return "executing", False
+            return "thinking", False
         last_msg = _get_last_assistant_message(event)
         if _looks_like_user_prompt(last_msg):
             return "waiting", False
@@ -525,10 +818,216 @@ def detect_client_app(environ: dict[str, str] | None = None, ppid: int | None = 
     return None
 
 
+def _send_status_message(message: dict[str, Any]) -> None:
+    try:
+        encoded = json.dumps(message, separators=(",", ":")).encode("utf-8")
+        # 1. Fast local UDP broadcast
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.2)
+                sock.sendto(encoded, (HOST, PORT))
+        except OSError:
+            pass
+
+        # 2. TCP socket fallback for SSH RemoteForward tunneling (e.g. Cloudtop)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.25)
+                sock.connect((HOST, PORT))
+                sock.sendall(encoded + b"\n")
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _watcher_pid_file(session_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+    return Path(tempfile.gettempdir()) / f"mf17_subwatch_{safe_id}.pid"
+
+
+def _maybe_spawn_subagent_watcher(
+    session_id: str,
+    transcript_path: str,
+    workspace_name: str,
+    client_app: str | None,
+    parent_pid: int,
+    is_remote: bool,
+    force: bool = False,
+) -> None:
+    if os.environ.get("MF17_DISABLE_SUBAGENT_WATCHER") == "1":
+        return
+    if not session_id or session_id == "unknown":
+        return
+
+    resolved = Path(transcript_path) if transcript_path else (
+        Path.home() / ".gemini" / "jetski" / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+    )
+    if not force and not resolved.exists():
+        return
+
+    pid_file = _watcher_pid_file(session_id)
+    try:
+        if pid_file.exists():
+            raw_pid = pid_file.read_text(encoding="utf-8", errors="replace").strip()
+            if raw_pid.isdigit() and _is_pid_running(int(raw_pid)):
+                return
+    except OSError:
+        pass
+
+    try:
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--watch-subagents",
+            session_id,
+            "--transcript",
+            str(resolved),
+            "--workspace",
+            workspace_name or "",
+            "--client-app",
+            client_app or "",
+            "--parent-pid",
+            str(parent_pid or 0),
+        ]
+        if is_remote:
+            cmd.append("--is-remote")
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _run_subagent_watcher(
+    session_id: str,
+    transcript_path: str,
+    workspace_name: str,
+    client_app: str | None,
+    parent_pid: int,
+    is_remote: bool,
+    poll_interval: float = 1.0,
+    max_duration: float = 1800.0,
+) -> int:
+    pid_file = _watcher_pid_file(session_id)
+    try:
+        if pid_file.exists():
+            raw_pid = pid_file.read_text(encoding="utf-8", errors="replace").strip()
+            if raw_pid.isdigit() and int(raw_pid) != os.getpid() and _is_pid_running(int(raw_pid)):
+                return 0
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+
+    p = Path(transcript_path) if transcript_path else (
+        Path.home() / ".gemini" / "jetski" / "brain" / session_id / ".system_generated" / "logs" / "transcript.jsonl"
+    )
+    brain_dir = (
+        p.parents[3]
+        if p.parent.name == "logs" and p.parent.parent.name == ".system_generated" and len(p.parents) >= 4
+        else Path.home() / ".gemini" / "jetski" / "brain"
+    )
+
+    last_sent: dict[str, str] = {}
+    last_sent_ts: dict[str, float] = {}
+    start_time = time.monotonic()
+    idle_ticks = 0
+
+    try:
+        while (time.monotonic() - start_time) < max_duration:
+            now_wall = time.time()
+            lines = _read_tail_lines(p) if p.exists() else []
+            sub_states = (
+                aggregate_subagent_transcript_states(
+                    brain_dir,
+                    lines,
+                    parent_session_id=session_id,
+                    now=now_wall,
+                )
+                if lines
+                else {}
+            )
+
+            has_active = False
+            for sub_id, st in sub_states.items():
+                is_active = st not in {"complete", "off", "idle"}
+                if is_active:
+                    has_active = True
+                prev = last_sent.get(sub_id)
+                prev_ts = last_sent_ts.get(sub_id, 0.0)
+                if prev != st or (is_active and (now_wall - prev_ts) >= 15.0):
+                    _send_status_message({
+                        "kind": "jetski_status",
+                        "provider": "antigravity",
+                        "session_id": session_id,
+                        "actor_id": sub_id,
+                        "is_subagent": True,
+                        "status": st,
+                        "remove": st in {"complete", "off"},
+                        "transcript_path": str(p),
+                        "event": f"SubagentWatch:{st}",
+                        "pid": parent_pid or None,
+                        "is_remote": is_remote,
+                        "workspace": workspace_name,
+                        "client_app": client_app or None,
+                    })
+                    last_sent[sub_id] = st
+                    last_sent_ts[sub_id] = now_wall
+
+            if has_active:
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks >= 8:
+                    break
+
+            time.sleep(poll_interval)
+    finally:
+        try:
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8", errors="replace").strip() == str(os.getpid()):
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Antigravity/Jetski MF17 lifecycle status hook")
     parser.add_argument("--event", type=str, default=None, help="Explicit event name (e.g. PreInvocation, PreToolUse, Stop)")
+    parser.add_argument("--watch-subagents", type=str, default=None, help="Internal: watch subagent transcripts for parent session")
+    parser.add_argument("--transcript", type=str, default="", help="Internal: parent transcript path")
+    parser.add_argument("--workspace", type=str, default="", help="Internal: workspace name")
+    parser.add_argument("--client-app", type=str, default="", help="Internal: client app label")
+    parser.add_argument("--parent-pid", type=int, default=0, help="Internal: parent process PID")
+    parser.add_argument("--is-remote", action="store_true", help="Internal: mark events as remote")
     args, _ = parser.parse_known_args()
+
+    if args.watch_subagents:
+        return _run_subagent_watcher(
+            session_id=args.watch_subagents,
+            transcript_path=args.transcript,
+            workspace_name=args.workspace,
+            client_app=args.client_app or None,
+            parent_pid=args.parent_pid,
+            is_remote=args.is_remote,
+        )
 
     payload: dict[str, Any] = {}
     if not sys.stdin.isatty():
@@ -566,8 +1065,10 @@ def main() -> int:
     # Option 1: Route subagent status directly into the parent conversation's key slot
     if parent_id and parent_id != raw_session_id:
         session_id = parent_id
-        # Subagent stopping does not remove the parent slot
-        if is_subagent:
+        # Subagent stopping clears only the subagent actor, not the parent slot
+        if is_subagent and status in {"complete", "off"}:
+            remove = True
+        elif is_subagent:
             remove = False
     else:
         session_id = raw_session_id
@@ -629,10 +1130,18 @@ def main() -> int:
         except Exception:
             pass
 
+    raw_fully_idle = payload.get("fullyIdle")
+    if not isinstance(raw_fully_idle, bool):
+        raw_fully_idle = payload.get("fully_idle")
+    fully_idle = raw_fully_idle if isinstance(raw_fully_idle, bool) else None
+
     message = {
         "kind": "jetski_status",
         "provider": "antigravity",
         "session_id": session_id,
+        "actor_id": raw_session_id,
+        "is_subagent": is_subagent,
+        "fully_idle": fully_idle,
         "status": status,
         "remove": remove,
         "transcript_path": transcript_path,
@@ -646,26 +1155,41 @@ def main() -> int:
         "tty": tty,
     }
 
-    try:
-        encoded = json.dumps(message, separators=(",", ":")).encode("utf-8")
-        # 1. Fast local UDP broadcast
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(0.2)
-                sock.sendto(encoded, (HOST, PORT))
-        except OSError:
-            pass
+    _send_status_message(message)
 
-        # 2. TCP socket fallback for SSH RemoteForward tunneling (e.g. Cloudtop)
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(0.25)
-                sock.connect((HOST, PORT))
-                sock.sendall(encoded + b"\n")
-        except OSError:
-            pass
-    except Exception:
-        pass
+    # For root sessions that spawn subagents (including subagents with inheritCustomizations: false
+    # that do not run hooks.json), ensure a detached lightweight watcher monitors their transcripts.
+    if not is_subagent and session_id != "unknown":
+        tool_base = _base_tool_name(_tool_name(payload))
+        sub_states = _get_subagent_states_for_event(payload, session_id=session_id)
+        has_active_subs = any(st not in {"complete", "off", "idle"} for st in sub_states.values())
+        if tool_base in SUBAGENT_SPAWN_TOOLS or has_active_subs:
+            for sub_id, sub_st in sub_states.items():
+                if sub_st not in {"complete", "off", "idle"}:
+                    _send_status_message({
+                        "kind": "jetski_status",
+                        "provider": "antigravity",
+                        "session_id": session_id,
+                        "actor_id": sub_id,
+                        "is_subagent": True,
+                        "status": sub_st,
+                        "remove": False,
+                        "transcript_path": transcript_path,
+                        "event": f"SubagentWatch:{sub_st}",
+                        "pid": ppid,
+                        "is_remote": is_remote,
+                        "workspace": workspace_name,
+                        "client_app": client_app,
+                    })
+            _maybe_spawn_subagent_watcher(
+                session_id=session_id,
+                transcript_path=transcript_path,
+                workspace_name=workspace_name,
+                client_app=client_app,
+                parent_pid=ppid,
+                is_remote=is_remote,
+                force=(tool_base in SUBAGENT_SPAWN_TOOLS),
+            )
 
     # Return expected protojson output schema based on lifecycle event
     event_name = _event_name(payload, args.event)

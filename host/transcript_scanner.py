@@ -12,12 +12,14 @@ from typing import Any
 
 try:
     from host.status_common import (
+        aggregate_subagent_transcript_states,
         looks_like_user_prompt,
         scan_transcript_background_tasks,
     )
     from host.session_slots import AGENT_SLOT_COUNT
 except ModuleNotFoundError:
     from status_common import (  # type: ignore[no-redef]
+        aggregate_subagent_transcript_states,
         looks_like_user_prompt,
         scan_transcript_background_tasks,
     )
@@ -163,6 +165,23 @@ def latest_transcript_state(path: Path) -> str | None:
         return None
 
     completed_tasks, running_tasks = scan_transcript_background_tasks(lines)
+    has_active_subagents = False
+    if path.parent.name == "logs" and path.parent.parent.name == ".system_generated":
+        try:
+            session_dir = path.parents[2]
+            brain_dir = path.parents[3]
+            sub_states = aggregate_subagent_transcript_states(
+                brain_dir,
+                lines,
+                parent_session_id=session_dir.name,
+            )
+            if any(st == "waiting" for st in sub_states.values()):
+                return "waiting"
+            if any(st in {"executing", "thinking"} for st in sub_states.values()):
+                has_active_subagents = True
+        except IndexError:
+            pass
+
     completed_codex_calls: set[str] = set()
     latest_terminal_state: str | None = None
 
@@ -204,7 +223,7 @@ def latest_transcript_state(path: Path) -> str | None:
             return "waiting"
 
         if step_type == "USER_INPUT":
-            if running_tasks:
+            if running_tasks or has_active_subagents:
                 return "executing"
             return latest_terminal_state
 
@@ -237,7 +256,7 @@ def latest_transcript_state(path: Path) -> str | None:
             if event_type == "task_started":
                 return None
 
-    if running_tasks:
+    if running_tasks or has_active_subagents:
         return "executing"
 
     return latest_terminal_state

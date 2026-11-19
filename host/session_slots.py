@@ -24,6 +24,33 @@ NUMERIC_KEY_BY_SLOT = (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)
 RECENT_RANK_TO_SLOT = (9, 0, 1, 2, 3, 4, 5, 6, 7, 8)
 STALE_THINKING_TIMEOUT_SECS = 45.0
 RECONCILIATION_HOOK_COOLDOWN_SECS = 10.0
+STALE_SUBAGENT_ACTIVE_SECS = 600.0
+STALE_SUBAGENT_WAITING_SECS = 1800.0
+
+
+def _compute_effective_status(
+    parent_status: str,
+    subagents: dict[str, dict[str, Any]],
+    now: float | None = None,
+) -> str:
+    """Aggregate parent status and active subagent statuses into a single LED state."""
+    ts = now if now is not None else time.time()
+    stale_keys = [
+        sub_id
+        for sub_id, info in subagents.items()
+        if (
+            ts - float(info.get("updated", 0))
+            > (STALE_SUBAGENT_WAITING_SECS if info.get("status") == "waiting" else STALE_SUBAGENT_ACTIVE_SECS)
+        )
+    ]
+    for sub_id in stale_keys:
+        subagents.pop(sub_id, None)
+
+    if parent_status == "waiting" or any(info.get("status") == "waiting" for info in subagents.values()):
+        return "waiting"
+    if subagents:
+        return "executing"
+    return parent_status
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -58,14 +85,22 @@ class SessionSlots:
         terminal_app: str | None = None,
         iterm_session_id: str | None = None,
         tty: str | None = None,
+        actor_id: str | None = None,
+        is_subagent: bool = False,
+        fully_idle: bool | None = None,
     ) -> int | None:
         now = time.time()
         existing = next(
             (index for index, item in enumerate(self.slots) if item and item["session_id"] == session_id),
             None,
         )
+        sub_actor = (
+            actor_id.strip()
+            if actor_id and actor_id.strip() and (actor_id.strip() != session_id or is_subagent)
+            else ("_subagent" if is_subagent else None)
+        )
 
-        if remove:
+        if remove and not sub_actor:
             if existing is not None:
                 self.slots[existing] = None
             if self.active_session == session_id:
@@ -74,14 +109,40 @@ class SessionSlots:
             return existing
 
         if existing is None:
+            if remove and sub_actor:
+                return None
             existing = next((index for index, item in enumerate(self.slots) if item is None), None)
         if existing is None:
             existing = min(range(AGENT_SLOT_COUNT), key=lambda index: self.slots[index]["updated"])
 
         previous = self.slots[existing]
+        if previous and previous.get("session_id") != session_id:
+            previous = None
+
+        subagents: dict[str, dict[str, Any]] = dict(previous.get("subagents") or {}) if previous else {}
+        if sub_actor:
+            parent_status = (
+                str(previous.get("parent_status") or previous.get("status") or "executing")
+                if previous
+                else "executing"
+            )
+            if remove or status in {"complete", "off", "idle"}:
+                subagents.pop(sub_actor, None)
+            else:
+                subagents[sub_actor] = {"status": status, "updated": now}
+        else:
+            parent_status = status
+            if fully_idle is True and status in {"complete", "off", "idle"}:
+                subagents = {
+                    k: v for k, v in subagents.items() if v.get("status") == "waiting"
+                }
+
+        effective_status = _compute_effective_status(parent_status, subagents, now=now)
         self.slots[existing] = {
             "session_id": session_id,
-            "status": status,
+            "status": effective_status,
+            "parent_status": parent_status,
+            "subagents": subagents,
             "updated": now,
             "last_hook_time": now if from_hook else previous.get("last_hook_time", 0) if previous else 0,
             "provider": normalize_provider(
@@ -116,24 +177,28 @@ class SessionSlots:
         if existing is None:
             return None
 
-        current_status = self.slots[existing]["status"]
+        slot_item = self.slots[existing]
+        current_status = slot_item["status"]
         if current_status == status or current_status == "error":
             return None
 
         now = time.time()
-        last_hook = self.slots[existing].get("last_hook_time", 0)
+        last_hook = slot_item.get("last_hook_time", 0)
 
         # Hook priority cooldown: if an authoritative hook event arrived recently,
         # suppress disk-based reconciliation from overriding it.
         if last_hook > 0 and (now - last_hook) < RECONCILIATION_HOOK_COOLDOWN_SECS:
             return None
 
-        # Premature complete recovery: only if background tasks are actively running in the transcript
+        subagents: dict[str, dict[str, Any]] = dict(slot_item.get("subagents") or {})
+
+        # Premature complete recovery: if background tasks or subagents are actively running/waiting in transcript
         if current_status == "complete":
-            if status == "executing":
-                self.slots[existing]["status"] = "executing"
-                self.slots[existing]["updated"] = now
-                return existing
+            if status in {"executing", "waiting"}:
+                slot_item["parent_status"] = status
+                slot_item["status"] = _compute_effective_status(status, subagents, now=now)
+                slot_item["updated"] = now
+                return existing if slot_item["status"] != current_status else None
             return None
 
         if current_status not in {"thinking", "executing"}:
@@ -141,15 +206,22 @@ class SessionSlots:
 
         # If an active thinking/executing session has a waiting or executing signal in transcript:
         if status in {"waiting", "executing"}:
-            self.slots[existing]["status"] = status
-            self.slots[existing]["updated"] = now
-            return existing
+            slot_item["parent_status"] = status
+            new_eff = _compute_effective_status(status, subagents, now=now)
+            if new_eff != current_status:
+                slot_item["status"] = new_eff
+                slot_item["updated"] = now
+                return existing
+            return None
 
         # Resolve stale thinking after timeout
         if (now - last_hook) >= STALE_THINKING_TIMEOUT_SECS:
-            self.slots[existing]["status"] = status
-            self.slots[existing]["updated"] = now
-            return existing
+            slot_item["parent_status"] = status
+            new_eff = _compute_effective_status(status, subagents, now=now)
+            if new_eff != current_status:
+                slot_item["status"] = new_eff
+                slot_item["updated"] = now
+                return existing
 
         return None
 

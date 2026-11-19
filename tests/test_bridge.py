@@ -762,8 +762,262 @@ class WindowsPageKeyInjectionTests(unittest.TestCase):
             self.assertIn('menu "Window" of menu bar 1 of p', script)
             self.assertIn("omni-colab", script)
 
+    def test_subagent_waiting_is_not_clobbered_by_parent_or_sibling_subagent(self):
+        bridge = Bridge(Path("host/actions.json"), dry_run=True)
+        reports = []
+        bridge.send_report = reports.append
+
+        parent_id = "36b5fc29-a648-418e-8914-460e6c83b87f"
+        sub_a = "36d26fe4-e482-48e4-83cf-be68b4fa9cf7"
+        sub_b = "61a6a591-3453-4711-a721-589ff144f8c4"
+
+        # 1. Parent starts and enters executing (waiting on subagents)
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": parent_id,
+            "status": "executing",
+            "event": "Stop",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "executing")
+
+        # 2. Subagent A hits a permission prompt (waiting -> amber)
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": sub_a,
+            "is_subagent": True,
+            "status": "waiting",
+            "event": "PreToolUse",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "waiting")
+        self.assertIn([MSG_SET_STATUS, 0, STATUS_IDS["waiting"]], reports[-2:])
+
+        # 3. Sibling Subagent B calls read_file (executing) and finishes (complete),
+        #    and Parent emits executing — slot MUST stay amber ("waiting")!
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": sub_b,
+            "is_subagent": True,
+            "status": "executing",
+            "event": "PreToolUse",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "waiting")
+
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": sub_b,
+            "is_subagent": True,
+            "status": "complete",
+            "event": "Stop",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "waiting")
+
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": parent_id,
+            "status": "executing",
+            "event": "Stop",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "waiting")
+
+        # 4. User approves Subagent A -> Subagent A resumes executing -> slot becomes purple ("executing")
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": sub_a,
+            "is_subagent": True,
+            "status": "thinking",
+            "event": "PostToolUse",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "executing")
+
+        # 5. Subagent A finishes and Parent finishes -> slot becomes green ("complete")
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": sub_a,
+            "is_subagent": True,
+            "status": "complete",
+            "event": "Stop",
+        })
+        bridge.process_status({
+            "kind": "jetski_status",
+            "session_id": parent_id,
+            "actor_id": parent_id,
+            "status": "complete",
+            "fully_idle": True,
+            "event": "Stop",
+        })
+        self.assertEqual(bridge.sessions.slots[0]["status"], "complete")
+
+    def test_unhooked_subagent_permission_block_detected_from_transcript(self):
+        parent_id = "36b5fc29-a648-418e-8914-460e6c83b87f"
+        sub_id = "36d26fe4-e482-48e4-83cf-be68b4fa9cf7"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            brain = Path(tmpdir) / "brain"
+            parent_log = brain / parent_id / ".system_generated" / "logs" / "transcript.jsonl"
+            sub_log = brain / sub_id / ".system_generated" / "logs" / "transcript.jsonl"
+            parent_log.parent.mkdir(parents=True)
+            sub_log.parent.mkdir(parents=True)
+
+            # Parent spawned sub_id via invoke_subagent and is waiting
+            parent_lines = [
+                json.dumps({"step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "review cl"}),
+                json.dumps({
+                    "step_index": 1,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [{"name": "invoke_subagent", "args": {"TypeName": "code_reviewer"}}],
+                    "content": "Spawning subagent.",
+                }),
+                json.dumps({
+                    "step_index": 2,
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "content": f'Created the following subagent:\n{{\n  "conversationId": "{sub_id}"\n}}',
+                }),
+            ]
+            parent_log.write_text("\n".join(parent_lines) + "\n", encoding="utf-8")
+
+            # 1. Subagent is actively reading files -> parent transcript state is "executing"
+            sub_log.write_text(
+                json.dumps({
+                    "step_index": 1,
+                    "created_at": "2026-11-18T22:20:00Z",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [{"name": "read_file", "args": {"Path": "/tmp/a"}}],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(latest_transcript_state(parent_log), "executing")
+
+            # 2. Subagent blocks on write_file (created > 2s ago with no GENERIC completion step) -> "waiting"
+            sub_log.write_text(
+                json.dumps({
+                    "step_index": 2,
+                    "created_at": "2020-01-01T00:00:00Z",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [{"name": "write_file", "args": {"Path": "/tmp/out.json"}}],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(latest_transcript_state(parent_log), "waiting")
+
+            # 3. Subagent finishes all work (PLANNER_RESPONSE DONE with no tool_calls) and parent finishes -> "complete"
+            sub_log.write_text(
+                json.dumps({
+                    "step_index": 3,
+                    "created_at": "2026-11-18T22:26:22Z",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [],
+                    "content": "Review complete.",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            parent_lines.append(
+                json.dumps({
+                    "step_index": 3,
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "tool_calls": [],
+                    "content": "Summary of review findings.",
+                })
+            )
+            parent_log.write_text("\n".join(parent_lines) + "\n", encoding="utf-8")
+            self.assertEqual(latest_transcript_state(parent_log), "complete")
+
+    def test_status_api_slots_sse_focus_and_clear(self):
+        import urllib.request
+        from host.status_api import StatusAPIServer
+
+        bridge = Bridge(Path("host/actions.json"), dry_run=True, enable_hid=False)
+        focused = []
+        bridge.controller.open_thread = lambda sid, slot=0, provider="": focused.append((sid, slot, provider))
+
+        api = StatusAPIServer(bridge, host="127.0.0.1", port=0)
+        bridge.status_api = api
+        api.start()
+        try:
+            base = f"http://127.0.0.1:{api.bound_port}"
+
+            # 1. Health check
+            with urllib.request.urlopen(f"{base}/health", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertTrue(json.loads(resp.read().decode("utf-8"))["ok"])
+
+            # 2. Populate two slots (one waiting via subagent, one complete)
+            bridge.process_status({
+                "kind": "jetski_status",
+                "session_id": "sess-1",
+                "actor_id": "sess-1",
+                "status": "complete",
+                "workspace": "repo-alpha",
+            })
+            bridge.process_status({
+                "kind": "jetski_status",
+                "session_id": "sess-2",
+                "actor_id": "sess-2",
+                "status": "executing",
+                "workspace": "repo-beta",
+                "client_app": "cider",
+            })
+            bridge.process_status({
+                "kind": "jetski_status",
+                "session_id": "sess-2",
+                "actor_id": "sub-2a",
+                "is_subagent": True,
+                "status": "waiting",
+                "workspace": "repo-beta",
+            })
+
+            with urllib.request.urlopen(f"{base}/slots", timeout=2.0) as resp:
+                snap = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(len(snap["slots"]), 2)
+                self.assertEqual(snap["slots"][0]["key"], 1)
+                self.assertEqual(snap["slots"][0]["status"], "complete")
+                self.assertEqual(snap["slots"][1]["key"], 2)
+                self.assertEqual(snap["slots"][1]["status"], "waiting")
+                self.assertEqual(snap["slots"][1]["subagent_count"], 1)
+                self.assertEqual(snap["slots"][1]["waiting_subagents"], 1)
+
+            # 3. Focus slot 1 (key 2) via POST /slots/1/focus
+            req = urllib.request.Request(f"{base}/slots/1/focus", method="POST")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["session_id"], "sess-2")
+            self.assertEqual(focused, [("sess-2", 1, PROVIDER_ANTIGRAVITY)])
+
+            # 4. SSE /events emits initial snapshot immediately
+            with urllib.request.urlopen(f"{base}/events", timeout=2.0) as resp:
+                line = resp.readline().decode("utf-8")
+                self.assertTrue(line.startswith("data: "))
+                sse_snap = json.loads(line[len("data: "):])
+                self.assertEqual(len(sse_snap["slots"]), 2)
+
+            # 5. Clear completed removes only slot 0 (complete) and preserves slot 1 (waiting)
+            req = urllib.request.Request(f"{base}/slots/clear-completed", method="POST")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(res["cleared"], 1)
+
+            with urllib.request.urlopen(f"{base}/slots", timeout=2.0) as resp:
+                snap = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual([s["session_id"] for s in snap["slots"]], ["sess-2"])
+        finally:
+            api.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -610,11 +610,12 @@ class OSController:
                         or "cider with jetski" in w_name.lower()
                     )
                     if (
-                        p_name.lower() in {"electron", "jetski", "com.google.jetski", "codex"}
-                        or p_bundle in {"com.google.jetski", "com.openai.codex"}
+                        p_name.lower() in {"electron", "jetski", "com.google.jetski", "codex", "agentstatusbar", "agent status bar"}
+                        or p_bundle in {"com.google.jetski", "com.openai.codex", "com.codexmicro.agentstatusbar"}
                         or is_cider_chrome
                     ):
-                        self.last_agent_window = window_data
+                        if p_name.lower() not in {"agentstatusbar", "agent status bar"} and p_bundle != "com.codexmicro.agentstatusbar":
+                            self.last_agent_window = window_data
                         return
 
                     self.previous_window_info = window_data
@@ -781,7 +782,7 @@ class OSController:
                                             set raisedWin to false
                                             set winNames to name of every window
                                             repeat with wIdx from 1 to count of winNames
-                                                if (item wIdx of winNames) is wTitle or (item wIdx of winNames) contains wTitle then
+                                                if (item wIdx of winNames) is wTitle then
                                                     set frontmost to true
                                                     try
                                                         perform action "AXRaise" of window wIdx
@@ -793,20 +794,46 @@ class OSController:
                                             if not raisedWin then
                                                 try
                                                     set menuNames to name of every menu item of menu "Window" of menu bar 1
+                                                    set targetMenuIdx to 0
                                                     repeat with mIdx from 1 to count of menuNames
                                                         set mName to item mIdx of menuNames
-                                                        if mName is not missing value and (mName is wTitle or mName starts with wTitle or mName contains wTitle) then
-                                                            try
-                                                                click menu item mIdx of menu "Window" of menu bar 1
-                                                            end try
-                                                            set frontmost to true
-                                                            try
-                                                                click menu item mIdx of menu "Window" of menu bar 1
-                                                            end try
+                                                        if mName is not missing value and mName is wTitle then
+                                                            set targetMenuIdx to mIdx
                                                             exit repeat
                                                         end if
                                                     end repeat
+                                                    if targetMenuIdx is 0 then
+                                                        repeat with mIdx from 1 to count of menuNames
+                                                            set mName to item mIdx of menuNames
+                                                            if mName is not missing value and (mName starts with wTitle or mName contains wTitle) then
+                                                                set targetMenuIdx to mIdx
+                                                                exit repeat
+                                                            end if
+                                                        end repeat
+                                                    end if
+                                                    if targetMenuIdx > 0 then
+                                                        try
+                                                            click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                        end try
+                                                        set frontmost to true
+                                                        try
+                                                            click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                        end try
+                                                        set raisedWin to true
+                                                    end if
                                                 end try
+                                            end if
+                                            if not raisedWin then
+                                                repeat with wIdx from 1 to count of winNames
+                                                    if (item wIdx of winNames) contains wTitle then
+                                                        set frontmost to true
+                                                        try
+                                                            perform action "AXRaise" of window wIdx
+                                                            set raisedWin to true
+                                                        end try
+                                                        exit repeat
+                                                    end if
+                                                end repeat
                                             end if
                                         end tell
                                     end tell
@@ -1337,7 +1364,7 @@ class OSController:
                                     set raisedWin to false
                                     set winNames to name of every window
                                     repeat with wIdx from 1 to count of winNames
-                                        if (item wIdx of winNames) is wTitle or (item wIdx of winNames) contains wTitle then
+                                        if (item wIdx of winNames) is wTitle then
                                             set frontmost to true
                                             try
                                                 perform action "AXRaise" of window wIdx
@@ -1349,20 +1376,46 @@ class OSController:
                                     if not raisedWin then
                                         try
                                             set menuNames to name of every menu item of menu "Window" of menu bar 1
+                                            set targetMenuIdx to 0
                                             repeat with mIdx from 1 to count of menuNames
                                                 set mName to item mIdx of menuNames
-                                                if mName is not missing value and (mName is wTitle or mName starts with wTitle or mName contains wTitle) then
-                                                    try
-                                                        click menu item mIdx of menu "Window" of menu bar 1
-                                                    end try
-                                                    set frontmost to true
-                                                    try
-                                                        click menu item mIdx of menu "Window" of menu bar 1
-                                                    end try
+                                                if mName is not missing value and mName is wTitle then
+                                                    set targetMenuIdx to mIdx
                                                     exit repeat
                                                 end if
                                             end repeat
+                                            if targetMenuIdx is 0 then
+                                                repeat with mIdx from 1 to count of menuNames
+                                                    set mName to item mIdx of menuNames
+                                                    if mName is not missing value and (mName starts with wTitle or mName contains wTitle) then
+                                                        set targetMenuIdx to mIdx
+                                                        exit repeat
+                                                    end if
+                                                end repeat
+                                            end if
+                                            if targetMenuIdx > 0 then
+                                                try
+                                                    click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                end try
+                                                set frontmost to true
+                                                try
+                                                    click menu item targetMenuIdx of menu "Window" of menu bar 1
+                                                end try
+                                                set raisedWin to true
+                                            end if
                                         end try
+                                    end if
+                                    if not raisedWin then
+                                        repeat with wIdx from 1 to count of winNames
+                                            if (item wIdx of winNames) contains wTitle then
+                                                set frontmost to true
+                                                try
+                                                    perform action "AXRaise" of window wIdx
+                                                    set raisedWin to true
+                                                end try
+                                                exit repeat
+                                            end if
+                                        end repeat
                                     end if
                                 end tell
                             end tell

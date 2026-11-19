@@ -6,11 +6,13 @@ import argparse
 import json
 import os
 from pathlib import Path
+import queue
 import socket
 import sys
+import threading
 import time
 import traceback
-from typing import Any
+from typing import Any, Callable
 
 # Modular subcomponents (with relative/top-level fallback imports)
 try:
@@ -77,6 +79,11 @@ try:
         root_codex_session_id,
         visible_codex_session_ids,
     )
+    from host.status_api import (
+        DEFAULT_HTTP_HOST,
+        DEFAULT_HTTP_PORT,
+        StatusAPIServer,
+    )
 except ModuleNotFoundError:
     from lighting_api import (  # type: ignore[no-redef]
         ACK_OK,
@@ -140,6 +147,11 @@ except ModuleNotFoundError:
         latest_transcript_state,
         root_codex_session_id,
         visible_codex_session_ids,
+    )
+    from status_api import (  # type: ignore[no-redef]
+        DEFAULT_HTTP_HOST,
+        DEFAULT_HTTP_PORT,
+        StatusAPIServer,
     )
 
 VID = 0x3A54
@@ -221,6 +233,8 @@ class Bridge:
         dry_run: bool = False,
         provider: str | None = None,
         active_only: bool = True,
+        enable_hid: bool = True,
+        http_port: int | None = None,
     ) -> None:
         self.actions = json.loads(actions_path.read_text(encoding="utf-8"))
         self.sessions = SessionSlots()
@@ -228,6 +242,16 @@ class Bridge:
         self.device: Any = None
         self.dry_run = dry_run
         self.active_only = active_only
+        self.enable_hid = enable_hid and not dry_run
+        if http_port is None:
+            env_port = os.environ.get("MF17_STATUS_HTTP_PORT", "").strip()
+            http_port = int(env_port) if env_port.isdigit() else DEFAULT_HTTP_PORT
+        self.http_port = int(http_port)
+        self._lock = threading.RLock()
+        self._running = False
+        self._main_thread_id: int | None = None
+        self._pending_actions: queue.Queue[tuple[Callable[[], Any], threading.Event, list[Any]]] = queue.Queue()
+        self.status_api: StatusAPIServer | None = None
         self.udp_socket: socket.socket | None = None
         self.last_session_scan = 0.0
         self.session_files: dict[str, Path] = {}
@@ -239,6 +263,160 @@ class Bridge:
         self.lighting_key_count = KEY_COUNT
         self.action_protocol_version = PROTOCOL_VERSION
         self.completed_override_keys: set[str] = set()
+
+    def _notify_status_api(self) -> None:
+        api = self.status_api
+        if api is not None:
+            api.notify_change()
+
+    def get_slots_snapshot(self, version: int = 0) -> dict[str, Any]:
+        with self._lock:
+            slots_out: list[dict[str, Any]] = []
+            for slot, item in enumerate(self.sessions.slots):
+                if not item or item.get("status") == "off":
+                    continue
+                subagents = item.get("subagents") or {}
+                waiting_subs = sum(
+                    1 for sub in subagents.values() if isinstance(sub, dict) and sub.get("status") == "waiting"
+                )
+                slots_out.append({
+                    "slot": slot,
+                    "key": NUMERIC_KEY_BY_SLOT[slot],
+                    "session_id": item["session_id"],
+                    "status": item["status"],
+                    "parent_status": item.get("parent_status", item["status"]),
+                    "subagent_count": len(subagents),
+                    "waiting_subagents": waiting_subs,
+                    "workspace": item.get("workspace") or "",
+                    "provider": item.get("provider") or PROVIDER_ANTIGRAVITY,
+                    "client_app": item.get("client_app"),
+                    "terminal_app": item.get("terminal_app"),
+                    "is_remote": bool(item.get("is_remote", False)),
+                    "updated": float(item.get("updated", 0.0)),
+                })
+            return {
+                "version": version,
+                "active_session": self.sessions.active_session,
+                "slots": slots_out,
+            }
+
+    def _run_on_bridge_thread(self, fn: Callable[[], Any], timeout: float = 3.5) -> Any:
+        """Execute an action on the bridge main loop when running (same thread as HID keys)."""
+        if not self._running or threading.get_ident() == self._main_thread_id:
+            return fn()
+        done = threading.Event()
+        box: list[Any] = [None, None]
+        self._pending_actions.put((fn, done, box))
+        if not done.wait(timeout=timeout):
+            return {"ok": False, "error": "timeout"}
+        if box[1] is not None:
+            raise box[1]
+        return box[0]
+
+    def _drain_pending_actions(self) -> None:
+        while True:
+            try:
+                fn, done, box = self._pending_actions.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                box[0] = fn()
+            except Exception as exc:
+                box[1] = exc
+            finally:
+                done.set()
+
+    def _focus_slot_impl(self, slot: int) -> dict[str, Any]:
+        with self._lock:
+            session_id = self.sessions.session_for_slot(slot)
+            provider = self.sessions.provider_for_slot(slot)
+            if not session_id:
+                return {"ok": False, "error": "empty_slot", "slot": slot}
+            slot_item = self.sessions.slots[slot] if 0 <= slot < len(self.sessions.slots) else None
+            ws = str(slot_item.get("workspace") or "") if slot_item else ""
+            term = str(slot_item.get("terminal_app") or "") if slot_item else ""
+            client = str(slot_item.get("client_app") or "") if slot_item else ""
+            self.send_report([MSG_SET_SELECTED, slot])
+        self.controller.open_thread(session_id, slot=slot, provider=provider)
+        detail_parts = [f"key={NUMERIC_KEY_BY_SLOT[slot]}", f"provider={provider}", f"session={session_id}"]
+        if ws:
+            detail_parts.append(f"workspace={ws}")
+        if term:
+            detail_parts.append(f"terminal={term}")
+        if client:
+            detail_parts.append(f"client={client}")
+        self.log("selected task (api) " + " ".join(detail_parts))
+        return {"ok": True, "slot": slot, "key": NUMERIC_KEY_BY_SLOT[slot], "session_id": session_id}
+
+    def focus_slot(self, slot: int) -> dict[str, Any]:
+        return self._run_on_bridge_thread(lambda: self._focus_slot_impl(slot))
+
+    def focus_key(self, key_num: int) -> dict[str, Any]:
+        try:
+            slot = NUMERIC_KEY_BY_SLOT.index(int(key_num))
+        except ValueError:
+            return {"ok": False, "error": "invalid_key", "key": key_num}
+        return self.focus_slot(slot)
+
+    def _clear_slot_impl(self, slot: int) -> bool:
+        with self._lock:
+            session_id = self.sessions.session_for_slot(slot)
+            if not session_id:
+                return False
+            self.sessions.update(session_id, "off", remove=True)
+            self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+            self.update_slot_lighting(slot, "off")
+            self.log(f"cleared slot key={NUMERIC_KEY_BY_SLOT[slot]} session={session_id}")
+        self._notify_status_api()
+        return True
+
+    def clear_slot(self, slot: int) -> bool:
+        return bool(self._run_on_bridge_thread(lambda: self._clear_slot_impl(slot)))
+
+    def _clear_completed_slots_impl(self) -> int:
+        cleared = 0
+        with self._lock:
+            for slot, item in enumerate(list(self.sessions.slots)):
+                if item and item.get("status") in {"complete", "idle"}:
+                    sid = item["session_id"]
+                    self.sessions.update(sid, "off", remove=True)
+                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+                    self.update_slot_lighting(slot, "off")
+                    cleared += 1
+        if cleared:
+            self.log(f"cleared {cleared} completed slot(s)")
+            self._notify_status_api()
+        return cleared
+
+    def clear_completed_slots(self) -> int:
+        return int(self._run_on_bridge_thread(self._clear_completed_slots_impl))
+
+    def _clear_all_slots_impl(self) -> int:
+        cleared = 0
+        with self._lock:
+            for slot, item in enumerate(list(self.sessions.slots)):
+                if item:
+                    sid = item["session_id"]
+                    self.sessions.update(sid, "off", remove=True)
+                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+                    self.update_slot_lighting(slot, "off")
+                    cleared += 1
+        if cleared:
+            self.log(f"cleared all {cleared} slot(s)")
+            self._notify_status_api()
+        return cleared
+
+    def clear_all_slots(self) -> int:
+        return int(self._run_on_bridge_thread(self._clear_all_slots_impl))
+
+    def _restore_previous_window_impl(self) -> bool:
+        ok = bool(self.controller.restore_previous_window())
+        if ok:
+            self.log("switched back to previous window (api)")
+        return ok
+
+    def restore_previous_window(self) -> bool:
+        return bool(self._run_on_bridge_thread(self._restore_previous_window_impl))
 
     def log(self, message: str) -> None:
         if self.dry_run:
@@ -332,43 +510,54 @@ class Bridge:
         return results
 
     def refresh_recent_sessions(self) -> None:
+        state_changed = False
         # Check if any active local session's parent process (Jetski window / CLI) has terminated
-        for slot, item in enumerate(list(self.sessions.slots)):
-            if item and item.get("status") not in {"off"} and not item.get("is_remote", False):
-                pid = item.get("pid")
-                if pid and not is_pid_alive(pid):
-                    sid = item["session_id"]
-                    self.sessions.update(sid, "off", remove=True)
-                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
-                    self.update_slot_lighting(slot, "off")
-                    self.log(f"session {sid} window (PID {pid}) closed -> turned off slot {slot}")
+        with self._lock:
+            for slot, item in enumerate(list(self.sessions.slots)):
+                if item and item.get("status") not in {"off"} and not item.get("is_remote", False):
+                    pid = item.get("pid")
+                    if pid and not is_pid_alive(pid):
+                        sid = item["session_id"]
+                        self.sessions.update(sid, "off", remove=True)
+                        self.send_report([MSG_SET_STATUS, slot, STATUS_IDS["off"]])
+                        self.update_slot_lighting(slot, "off")
+                        self.log(f"session {sid} window (PID {pid}) closed -> turned off slot {slot}")
+                        state_changed = True
 
         if self.active_only:
-            if self.sessions.populate_recent([], active_only=True):
-                self.sync_leds()
+            with self._lock:
+                if self.sessions.populate_recent([], active_only=True):
+                    self.sync_leds()
+                    state_changed = True
 
-            for item in self.sessions.slots:
-                if not item:
-                    continue
-                sid = item["session_id"]
-                if sid not in self.session_files:
-                    path = self.find_transcript_for_session(sid)
-                    if path:
-                        self.session_files[sid] = path
-                        self.session_providers[sid] = item.get("provider", PROVIDER_ANTIGRAVITY)
+                for item in self.sessions.slots:
+                    if not item:
+                        continue
+                    sid = item["session_id"]
+                    if sid not in self.session_files:
+                        path = self.find_transcript_for_session(sid)
+                        if path:
+                            self.session_files[sid] = path
+                            self.session_providers[sid] = item.get("provider", PROVIDER_ANTIGRAVITY)
+                files_snapshot = list(self.session_files.items())
 
-            for session_id, path in list(self.session_files.items()):
+            for session_id, path in files_snapshot:
                 state = latest_transcript_state(path)
                 if state is None:
                     continue
-                slot = self.sessions.reconcile_terminal(session_id, state)
-                if slot is not None:
-                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
-                    self.update_slot_lighting(slot, state)
-                    self.log(
-                        f"reconciled session={session_id} state={state} "
-                        f"key={NUMERIC_KEY_BY_SLOT[slot]}"
-                    )
+                with self._lock:
+                    slot = self.sessions.reconcile_terminal(session_id, state)
+                    if slot is not None:
+                        eff_state = self.sessions.slots[slot]["status"] if self.sessions.slots[slot] else state
+                        self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_state]])
+                        self.update_slot_lighting(slot, eff_state)
+                        self.log(
+                            f"reconciled session={session_id} state={eff_state} "
+                            f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+                        )
+                        state_changed = True
+            if state_changed:
+                self._notify_status_api()
             return
 
         recent = self.find_recent_sessions()
@@ -382,25 +571,33 @@ class Bridge:
         self.session_files = session_files
         self.session_providers = providers
 
-        if self.sessions.populate_recent(session_ids, providers=providers, active_only=False):
-            self.sync_leds()
-            self.log("loaded numeric task slots: " + ", ".join(
-                f"{NUMERIC_KEY_BY_SLOT[slot]}={item['session_id']}"
-                for slot, item in enumerate(self.sessions.slots) if item
-            ))
+        with self._lock:
+            if self.sessions.populate_recent(session_ids, providers=providers, active_only=False):
+                self.sync_leds()
+                self.log("loaded numeric task slots: " + ", ".join(
+                    f"{NUMERIC_KEY_BY_SLOT[slot]}={item['session_id']}"
+                    for slot, item in enumerate(self.sessions.slots) if item
+                ))
+                state_changed = True
 
         for session_id, path in self.session_files.items():
             state = latest_transcript_state(path)
             if state is None:
                 continue
-            slot = self.sessions.reconcile_terminal(session_id, state)
-            if slot is not None:
-                self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[state]])
-                self.update_slot_lighting(slot, state)
-                self.log(
-                    f"reconciled session={session_id} state={state} "
-                    f"key={NUMERIC_KEY_BY_SLOT[slot]}"
-                )
+            with self._lock:
+                slot = self.sessions.reconcile_terminal(session_id, state)
+                if slot is not None:
+                    eff_state = self.sessions.slots[slot]["status"] if self.sessions.slots[slot] else state
+                    self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_state]])
+                    self.update_slot_lighting(slot, eff_state)
+                    self.log(
+                        f"reconciled session={session_id} state={eff_state} "
+                        f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+                    )
+                    state_changed = True
+
+        if state_changed:
+            self._notify_status_api()
 
     def connect(self) -> bool:
         if self.dry_run:
@@ -488,7 +685,10 @@ class Bridge:
             or "unknown"
         )
         pid = payload.get("pid")
-        is_remote = bool(payload.get("is_remote", False)) or source == "tcp"
+        if "is_remote" in payload and payload.get("is_remote") is not None:
+            is_remote = bool(payload.get("is_remote"))
+        else:
+            is_remote = source == "tcp"
         if not is_remote and isinstance(pid, (int, str)) and str(pid).isdigit():
             # Standard macOS PID_MAX is 99999. PIDs > 100000 are Linux / Cloudtop processes
             if int(pid) > 100000:
@@ -498,32 +698,45 @@ class Bridge:
         terminal_app = payload.get("terminal_app")
         iterm_session_id = payload.get("iterm_session_id")
         tty = payload.get("tty")
-        slot = self.sessions.update(
-            session_id,
-            status,
-            bool(payload.get("remove", False)),
-            from_hook=True,
-            provider=provider,
-            pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
-            is_remote=is_remote,
-            workspace=workspace,
-            client_app=str(client_app) if client_app else None,
-            terminal_app=str(terminal_app) if terminal_app else None,
-            iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
-            tty=str(tty) if tty else None,
-        )
-        if slot is not None:
-            eff_status = "off" if payload.get("remove") else status
-            self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_status]])
-            self.update_slot_lighting(slot, eff_status)
-            ev = payload.get("event") or ""
-            ev_str = f" event={ev}" if ev else ""
-            ws_str = f" workspace={workspace}" if workspace else ""
-            client_str = f" client={client_app}" if client_app else ""
-            self.log(
-                f"status provider={provider} session={session_id} state={status}{ev_str}{ws_str}{client_str} "
-                f"key={NUMERIC_KEY_BY_SLOT[slot]}"
+        actor_id = str(payload.get("actor_id") or "").strip() or None
+        is_subagent = bool(payload.get("is_subagent", False))
+        raw_fully_idle = payload.get("fully_idle")
+        fully_idle = raw_fully_idle if isinstance(raw_fully_idle, bool) else None
+        is_sub_actor = bool((actor_id and actor_id != session_id) or is_subagent)
+        with self._lock:
+            slot = self.sessions.update(
+                session_id,
+                status,
+                bool(payload.get("remove", False)),
+                from_hook=True,
+                provider=provider,
+                pid=int(pid) if isinstance(pid, (int, str)) and str(pid).isdigit() else None,
+                is_remote=is_remote,
+                workspace=workspace,
+                client_app=str(client_app) if client_app else None,
+                terminal_app=str(terminal_app) if terminal_app else None,
+                iterm_session_id=str(iterm_session_id) if iterm_session_id else None,
+                tty=str(tty) if tty else None,
+                actor_id=actor_id,
+                is_subagent=is_subagent,
+                fully_idle=fully_idle,
             )
+            if slot is not None:
+                slot_item = self.sessions.slots[slot]
+                eff_status = slot_item["status"] if slot_item else "off"
+                self.send_report([MSG_SET_STATUS, slot, STATUS_IDS[eff_status]])
+                self.update_slot_lighting(slot, eff_status)
+                ev = payload.get("event") or ""
+                ev_str = f" event={ev}" if ev else ""
+                ws_str = f" workspace={workspace}" if workspace else ""
+                client_str = f" client={client_app}" if client_app else ""
+                actor_str = f" subagent={actor_id[:8]}({status})" if is_sub_actor and actor_id else ""
+                self.log(
+                    f"status provider={provider} session={session_id} state={eff_status}{actor_str}"
+                    f"{ev_str}{ws_str}{client_str} key={NUMERIC_KEY_BY_SLOT[slot]}"
+                )
+        if slot is not None:
+            self._notify_status_api()
 
     def process_lighting(self, payload: dict[str, Any]) -> None:
         try:
@@ -647,85 +860,126 @@ class Bridge:
         tcp_sock.listen(5)
         tcp_sock.setblocking(False)
 
+        if self.http_port > 0:
+            try:
+                api = StatusAPIServer(self, host=DEFAULT_HTTP_HOST, port=self.http_port)
+                api.start()
+                self.status_api = api
+                print(f"Agent status HTTP/SSE API listening on http://{DEFAULT_HTTP_HOST}:{api.bound_port}")
+                self.log(f"status API started on http://{DEFAULT_HTTP_HOST}:{api.bound_port}")
+            except OSError as exc:
+                print(f"Status HTTP API disabled (port {self.http_port} error: {exc})", file=sys.stderr)
+                self.log(f"status API failed on port {self.http_port}: {exc!r}")
+
         last_connect_attempt = 0.0
-        print(f"MF17 Codex/Antigravity bridge listening on udp+tcp://{UDP_HOST}:{UDP_PORT} (10 task slots)")
-        self.log("bridge started (10 Agent slots, UDP+TCP)")
+        hid_label = "HID+UI" if self.enable_hid else "UI-only (--no-hid)"
+        print(f"MF17 Codex/Antigravity bridge listening on udp+tcp://{UDP_HOST}:{UDP_PORT} (10 task slots, {hid_label})")
+        self.log(f"bridge started (10 Agent slots, UDP+TCP, {hid_label})")
         self.refresh_recent_sessions()
+        self._main_thread_id = threading.get_ident()
+        self._running = True
 
-        while True:
-            now = time.monotonic()
-            if now - self.last_session_scan >= 5.0:
-                self.last_session_scan = now
-                self.refresh_recent_sessions()
-            if self.device is None and now - last_connect_attempt >= 2.0:
-                last_connect_attempt = now
+        try:
+            while True:
+                self._drain_pending_actions()
+                now = time.monotonic()
+                if now - self.last_session_scan >= 5.0:
+                    self.last_session_scan = now
+                    self.refresh_recent_sessions()
+                if self.enable_hid and self.device is None and now - last_connect_attempt >= 2.0:
+                    last_connect_attempt = now
+                    try:
+                        if self.connect():
+                            print("Connected to MF17 Raw HID")
+                            self.log("connected to MF17 Raw HID")
+                    except OSError as exc:
+                        print(f"MF17 connect failed: {exc}", file=sys.stderr)
+                        self.log(f"connect failed: {exc!r}")
+
+                # 1. Process UDP status packets (fast local datagrams)
                 try:
-                    if self.connect():
-                        print("Connected to MF17 Raw HID")
-                        self.log("connected to MF17 Raw HID")
-                except OSError as exc:
-                    print(f"MF17 connect failed: {exc}", file=sys.stderr)
-                    self.log(f"connect failed: {exc!r}")
+                    while True:
+                        data, _ = udp_sock.recvfrom(4096)
+                        payload = json.loads(data.decode("utf-8"))
+                        kind = payload.get("kind")
+                        if kind in {"jetski_status", "antigravity_status", "codex_status"}:
+                            self.process_status(payload)
+                        elif kind == "lighting":
+                            self.process_lighting(payload)
+                except BlockingIOError:
+                    pass
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    print(f"Ignored malformed UDP packet: {exc}", file=sys.stderr)
 
-            # 1. Process UDP status packets (fast local datagrams)
-            try:
-                while True:
-                    data, _ = udp_sock.recvfrom(4096)
-                    payload = json.loads(data.decode("utf-8"))
-                    kind = payload.get("kind")
-                    if kind in {"jetski_status", "antigravity_status", "codex_status"}:
-                        self.process_status(payload)
-                    elif kind == "lighting":
-                        self.process_lighting(payload)
-            except BlockingIOError:
-                pass
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                print(f"Ignored malformed UDP packet: {exc}", file=sys.stderr)
+                # 2. Process TCP connections (SSH RemoteForward from Cloudtop or remote hosts)
+                try:
+                    while True:
+                        conn, _ = tcp_sock.accept()
+                        with conn:
+                            conn.settimeout(0.5)
+                            data = conn.recv(8192)
+                            if data:
+                                for line in data.decode("utf-8", errors="replace").splitlines():
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        payload = json.loads(line)
+                                        kind = payload.get("kind")
+                                        if kind in {"jetski_status", "antigravity_status", "codex_status"}:
+                                            self.process_status(payload, source="tcp")
+                                        elif kind == "lighting":
+                                            self.process_lighting(payload)
+                                    except json.JSONDecodeError:
+                                        pass
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    pass
 
-            # 2. Process TCP connections (SSH RemoteForward from Cloudtop or remote hosts)
+                if self.enable_hid and self.device is not None:
+                    try:
+                        report = self.device.read(REPORT_SIZE)
+                        self.process_hid_report(report)
+                    except OSError as exc:
+                        print(f"MF17 disconnected: {exc}", file=sys.stderr)
+                        self.log(f"MF17 disconnected: {exc!r}")
+                        try:
+                            self.device.close()
+                        finally:
+                            self.device = None
+
+                time.sleep(0.01)
+        finally:
+            self._running = False
+            self._drain_pending_actions()
+            if self.status_api is not None:
+                self.status_api.stop()
+                self.status_api = None
             try:
-                while True:
-                    conn, _ = tcp_sock.accept()
-                    with conn:
-                        conn.settimeout(0.5)
-                        data = conn.recv(8192)
-                        if data:
-                            for line in data.decode("utf-8", errors="replace").splitlines():
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    payload = json.loads(line)
-                                    kind = payload.get("kind")
-                                    if kind in {"jetski_status", "antigravity_status", "codex_status"}:
-                                        self.process_status(payload, source="tcp")
-                                    elif kind == "lighting":
-                                        self.process_lighting(payload)
-                                except json.JSONDecodeError:
-                                    pass
-            except BlockingIOError:
+                udp_sock.close()
+            except OSError:
                 pass
+            try:
+                tcp_sock.close()
             except OSError:
                 pass
 
-            if self.device is not None:
-                try:
-                    report = self.device.read(REPORT_SIZE)
-                    self.process_hid_report(report)
-                except OSError as exc:
-                    print(f"MF17 disconnected: {exc}", file=sys.stderr)
-                    self.log(f"MF17 disconnected: {exc!r}")
-                    try:
-                        self.device.close()
-                    finally:
-                        self.device = None
-
-            time.sleep(0.01)
-
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="MF17 Codex/Antigravity Keypad Bridge")
+    parser = argparse.ArgumentParser(description="MF17 Codex/Antigravity Keypad & Menu Bar Status Bridge")
     parser.add_argument("--dry-run", action="store_true", help="run without opening HID")
+    parser.add_argument(
+        "--no-hid",
+        action="store_true",
+        help="run status daemon + HTTP/SSE API without connecting to MF17 Raw HID hardware",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=None,
+        help=f"localhost HTTP/SSE status API port for menu bar / toolbar UI (default: {DEFAULT_HTTP_PORT}, 0 to disable)",
+    )
     parser.add_argument(
         "--provider",
         type=str,
@@ -757,6 +1011,8 @@ def main() -> int:
             dry_run=args.dry_run,
             provider=args.provider,
             active_only=args.active_only,
+            enable_hid=not args.no_hid,
+            http_port=args.http_port,
         )
         try:
             bridge.run()

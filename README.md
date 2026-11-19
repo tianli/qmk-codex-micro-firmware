@@ -105,6 +105,26 @@ To run automatically in the background at system boot:
 
 ---
 
+### 3b. macOS Menu Bar Colored Number Pills (With or Without Keypad)
+
+`mf17_bridge.py` also exposes a local HTTP + Server-Sent Events (SSE) API on `http://127.0.0.1:41718` (`--http-port`, or `0` to disable), paired with a native Swift macOS Menu Bar app ([`host/menubar/AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift)) that renders individual colored numbered pills (`1`–`9`, `0`) in the top-right menu bar:
+
+- **With MF17 keypad (both LEDs + menu bar pills simultaneously)**:
+  1. Run `./scripts/run-bridge.sh` as usual.
+  2. Launch `./scripts/run-menubar.sh` to attach the menu bar pills to the running bridge.
+- **Without MF17 keypad (menu bar pills only)**:
+  ```bash
+  ./scripts/run-menubar.sh
+  ```
+  If no bridge is listening on port `41718`, `run-menubar.sh` builds `AgentStatusBar.app` (if needed), automatically starts `mf17_bridge.py --no-hid`, and launches the menu bar app.
+
+**Menu bar interactions:**
+- **Left-click any pill**: immediately focuses that agent's Cider Chrome tab, Jetski IDE window, or iTerm2 pane (even across macOS Spaces).
+- **Right-click (or Control/Option-click)**: opens the session menu showing workspace names, live status (including blocked subagent counts), per-slot Focus / Clear actions, Switch to Previous Window, Clear Completed Slots, Clear All Slots, and Quit.
+- **Subagent badge**: a small corner dot appears on any pill with active subagents (and turns bright yellow while pulsing Amber if a subagent is blocked for user input).
+
+---
+
 ### 4. Utilities
 
 - **Check active conversation slots**:
