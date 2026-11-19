@@ -1,6 +1,11 @@
-# MF17 Codex / Antigravity Keypad Controller
+# MF17 Codex / Antigravity Keypad Controller & macOS Menu Bar Status Pills
 
-This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated physical control surface for **Codex and Antigravity** with **10 task status channels**. The bridge accepts both providers on the same UDP protocol and routes task selection to the appropriate desktop deep link. You can buy the hardware keyboard for ~$25 on Amazon, and spend another $15 for a set of translucent keycaps for lighting effects.
+This project provides two live control surfaces for **Codex and Antigravity/Jetski** with **10 task status channels** (usable together or independently):
+
+1. **Physical Keypad**: Turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into a dedicated backlit control surface. You can buy the hardware keyboard for ~$25 on Amazon, and spend another $15 for a set of translucent keycaps for lighting effects.
+2. **macOS Menu Bar Colored Number Pills** (no hardware required): A native Swift macOS menu bar app ([`AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift)) that displays individual colored numbered pills (`1`–`9`, `0`) across every display's menu bar, with one-click window/tab switching across macOS Spaces.
+
+The bridge accepts both providers (local and remote/Cloudtop over UDP + TCP) and tracks both primary agents and spawned subagents, automatically keeping a slot Amber whenever the parent agent or any subagent is blocked waiting for user input.
 
 ---
 
@@ -36,16 +41,32 @@ This project turns the **MagicForce / KISNT MF17** (`VID 3A54`, `PID 4F5D`) into
 - **Dictate (Hold)** (`.` key): **Hold-to-Talk Voice Dictation** — holding `.` starts macOS built-in Dictation (`Edit → Start Dictation`) in the active window (Chrome, Jetski, iTerm2, etc.) and releasing `.` automatically stops Dictation. In Codex (or when `MF17_VOICE_KEYS` is set), triggers the configured voice shortcut.
 - **Approve / Send** (`Enter` key): **Approve** (`Enter`) to confirm tool permissions / diff prompts, or **Send** to submit the current prompt.
 
-### Agent Status & Control Key LED Colors
+### Agent Status Colors (Keypad LEDs & Menu Bar Pills)
 
 - 🔵 **Blue** (`#304FFE`): Working / Generating / Thinking
-- 🟠 **Amber** (`#FF6D00`): Waiting for user input / tool permission / diff approval
-- 🟣 **Purple** (`#FF6D00`): External tool call
+- 🟠 **Amber** (`#FF6D00`): Waiting for user input / tool permission / diff approval *(pulses on menu bar pills; also triggered when any spawned subagent is blocked)*
+- 🟣 **Purple** (`#B400FF`): External tool call / executing command
 - 🟢 **Green** (`#00FF4C`): Turn complete
 - 🔴 **Red** (`#FF0033`): Error
 - ⚫ **Off**: Slot unassigned
 
-The 7 outer control keys feature a low-power ambient backlight so they are easy to locate in the dark (**Reject** `-` glows dim red; the other 6 control keys glow dim emerald) while preserving instant white press-and-fade hardware feedback over 900 ms.
+The 7 outer control keys on the keypad feature a low-power ambient backlight so they are easy to locate in the dark (**Reject** `-` glows dim red; the other 6 control keys glow dim emerald) while preserving instant white press-and-fade hardware feedback over 900 ms.
+
+---
+
+## macOS Menu Bar Colored Number Pills
+
+Don't have the MF17 keypad plugged in — or want on-screen status pills alongside the keypad? [`AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift) renders **individual native `NSStatusItem` colored number pills** (`1`–`9`, `0`) in the macOS top-right menu bar:
+
+- **Visible on every desktop & display**: Uses native `NSStatusItem` images so macOS replicates the pills across all monitors and Spaces in strict `1`–`9`, `0` order.
+- **Left-click any pill**: Flashes briefly and switches straight to that agent's Chrome Cider tab, Jetski Desktop IDE window, or iTerm2 pane — even across different macOS Desktops/Spaces, identical to pressing the matching keypad key.
+- **Hover tooltip**: Shows each pill's `[key] workspace — status (host app)` individually.
+- **Right-click (or Control/Option-click)**: Opens the session dropdown menu:
+  - Click any session row directly to focus it
+  - **Clear Slot** submenu to dismiss individual slots
+  - **Switch to Previous Window**, **Clear Completed Slots**, **Clear All Slots**, and **Quit**
+- **Subagent indicator**: A corner dot appears on any pill with active subagents (and turns bright yellow while the pill pulses Amber if any subagent is waiting for approval/input).
+- **Idle / disconnected state**: Displays a compact monochrome ring when no sessions are active (dashed while reconnecting to the bridge).
 
 ---
 
@@ -105,23 +126,46 @@ To run automatically in the background at system boot:
 
 ---
 
-### 3b. macOS Menu Bar Colored Number Pills (With or Without Keypad)
+### 3b. Run the macOS Menu Bar App (With or Without Keypad)
 
-`mf17_bridge.py` also exposes a local HTTP + Server-Sent Events (SSE) API on `http://127.0.0.1:41718` (`--http-port`, or `0` to disable), paired with a native Swift macOS Menu Bar app ([`host/menubar/AgentStatusBar.swift`](host/menubar/AgentStatusBar.swift)) that renders individual colored numbered pills (`1`–`9`, `0`) in the top-right menu bar:
+`mf17_bridge.py` exposes a localhost HTTP + Server-Sent Events (SSE) API on `http://127.0.0.1:41718` (`--http-port`, or `0` to disable), which powers the native macOS menu bar pills:
 
-- **With MF17 keypad (both LEDs + menu bar pills simultaneously)**:
-  1. Run `./scripts/run-bridge.sh` as usual.
-  2. Launch `./scripts/run-menubar.sh` to attach the menu bar pills to the running bridge.
-- **Without MF17 keypad (menu bar pills only)**:
+- **With MF17 keypad (keypad LEDs + menu bar pills simultaneously)**:
+  1. Start `./scripts/run-bridge.sh` as usual.
+  2. Launch the menu bar pills in another command (or background):
+     ```bash
+     ./scripts/run-menubar.sh
+     ```
+- **Without MF17 keypad (software-only menu bar pills)**:
   ```bash
   ./scripts/run-menubar.sh
   ```
-  If no bridge is listening on port `41718`, `run-menubar.sh` builds `AgentStatusBar.app` (if needed), automatically starts `mf17_bridge.py --no-hid`, and launches the menu bar app.
+  If no bridge is listening on port `41718`, `run-menubar.sh` automatically compiles `host/menubar/AgentStatusBar.app` (using Xcode Command Line Tools `swiftc`), starts `mf17_bridge.py --no-hid`, and launches the menu bar app.
 
-**Menu bar interactions:**
-- **Left-click any pill**: immediately focuses that agent's Cider Chrome tab, Jetski IDE window, or iTerm2 pane (even across macOS Spaces).
-- **Right-click (or Control/Option-click)**: opens the session menu showing workspace names, live status (including blocked subagent counts), per-slot Focus / Clear actions, Switch to Previous Window, Clear Completed Slots, Clear All Slots, and Quit.
-- **Subagent badge**: a small corner dot appears on any pill with active subagents (and turns bright yellow while pulsing Amber if a subagent is blocked for user input).
+To rebuild the app bundle manually after editing `AgentStatusBar.swift`:
+```bash
+./scripts/build-menubar.sh
+```
+
+#### Local HTTP / SSE Status API (`127.0.0.1:41718`)
+- `GET /health` — liveness check
+- `GET /slots` — JSON snapshot of active slots, effective/parent status, subagent counts, workspace, and host app
+- `GET /events` — live SSE stream pushing snapshots on every state change
+- `POST /slots/<slot>/focus` & `POST /keys/<key>/focus` — focus the slot's window/tab
+- `POST /slots/<slot>/clear`, `POST /slots/clear-completed`, `POST /slots/clear-all` — clear slots
+- `POST /previous-window` — switch back to the previously active non-agent window
+
+#### Remote / Cloudtop Agents over SSH
+To forward status updates from a remote host (such as Cloudtop) to your local Mac bridge, add a reverse TCP forward in `~/.ssh/config`:
+```sshconfig
+Host <your-remote-host>
+    RemoteForward 41717 127.0.0.1:41717
+```
+If the tunnel ever drops after sleep/wake on a `ControlMaster` session, re-attach it live without closing your SSH session:
+```bash
+ssh -O cancel -R 41717:127.0.0.1:41717 <your-remote-host>
+ssh -O forward -R 127.0.0.1:41717:127.0.0.1:41717 <your-remote-host>
+```
 
 ---
 
